@@ -1,0 +1,43 @@
+# ======================================
+# 🛰️ DORIS-based Python Project .gitignore
+# ======================================
+
+
+# 虚拟环境
+/.venv/
+
+
+# 包与构建
+/build/
+
+
+# -------- 科研与数据 --------
+/DORISInput/
+/Articles/
+/output/
+/results/
+/data/
+/temp/
+/tmp/
+/cache/
+/logs/
+
+# 常见数据文件类型
+*.csv
+*.tsv
+*.txt
+*.dat
+*.nc
+*.h5
+*.hdf5
+*.npz
+*.npy
+*.mat
+*.pkl
+*.gz
+*.zip
+
+# -------- 可选保留规则（取消注释即可保留）
+#!README.md
+#!requirements.txt
+#!setup.py
