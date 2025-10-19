@@ -8,7 +8,9 @@ import time
 import pickle
 import pandas as pd
 import constant as const
-import matplotlib.pyplot as plt
+
+satellite_list = ['ja2', 'ja3', 's3a', 's3b', 'srl']
+range_ratio_list = [0.925]
 
 def compute_roti(ns_doris_time, ref_epoch, time_gap=150):
 
@@ -137,9 +139,6 @@ def main_processing_pipeline(df_altimetry: pd.DataFrame, df_doris: pd.DataFrame,
         usemask=False
     )
     return pd.DataFrame.from_records(ns_altimetry_updated)
-
-satellite_list = ['ja2', 'ja3', 's3a', 's3b', 'srl']
-range_ratio_list = [0.925]
 
 def split_df_by_time(df, hours_per_chunk=3):
     df['hour'] = df['obs_epoch'].dt.hour
