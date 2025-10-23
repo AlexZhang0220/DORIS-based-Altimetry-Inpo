@@ -1,229 +1,217 @@
 import numpy as np
-from numpy.lib import recfunctions as rfn
-from datetime import datetime, timedelta
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from tools import haversine_vec, idw, get_igs_vtec
-from readFile import read_ionFile
-import time
-import pickle
 import pandas as pd
+from datetime import datetime, timedelta
+from tools import get_igs_vtec, haversine_vec, idw, get_gim_filename, latlon_to_unitvec
+from readFile import read_ionFile
+from pathlib import Path
+from scipy.spatial import cKDTree
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import constant as const
+import time
 
+# === Configuration ===
 satellite_list = ['ja2', 'ja3', 's3a', 's3b', 'srl']
 range_ratio_list = [0.925]
 
-def compute_roti(ns_doris_time, ref_epoch, time_gap=150):
+def _split_df(df, n_parts):
+    if len(df) == 0:
+        return [df]
+    return [df.iloc[s:e] for s, e in zip(
+        np.linspace(0, len(df), n_parts + 1, dtype=int)[:-1],
+        np.linspace(0, len(df), n_parts + 1, dtype=int)[1:]
+    ) if e > s]
 
-    time_diff_sec = np.abs((ns_doris_time['obs_epoch'] - ref_epoch) / np.timedelta64(1, 's'))
-    time_mask = time_diff_sec < time_gap
+# --- NumPy-only ROTI --- change from vtec to stec needed
+def compute_roti(epoch, vtec, station_code, pass_id, ref_epoch, time_gap_sec=150):
+    """ROTI = std of dVTEC/dt (per minute) within ±time_gap_sec around ref_epoch."""
 
-    d_epoch, d_vtec, d_station, d_passID = (
-            ns_doris_time['obs_epoch'][time_mask],
-            ns_doris_time['VTEC'][time_mask],
-            ns_doris_time['station_code'][time_mask],
-            ns_doris_time['pass_id'][time_mask]
-    )
-    station_encoded, _ = pd.factorize(d_station)
-    combined = np.stack([station_encoded, d_passID], axis=1)
+    in_win = np.abs((epoch - ref_epoch) / np.timedelta64(1, 's')) < float(time_gap_sec)
+    if np.count_nonzero(in_win) < 2:
+        return np.nan
 
-    unique_pairs, inverse_indices = np.unique(combined, axis=0, return_inverse=True)
+    e  = epoch[in_win]
+    v  = vtec[in_win]
+    st = station_code[in_win]
+    ps = pass_id[in_win]
 
-    rates = []
-    for idx, _ in enumerate(unique_pairs):
-        mask = inverse_indices == idx
-        # make sure the list is epoch-sequenced
-        group_epoch = d_epoch[mask]
-        group_vtec = d_vtec[mask]
+    df_pairs = pd.DataFrame({'st': st, 'ps': ps})
+    _, inv = np.unique(df_pairs[['st', 'ps']].apply(tuple, axis=1), return_inverse=True)
 
-        if len(group_epoch) < 2:
-            continue
-        dt_min = np.diff(group_epoch) / np.timedelta64(1, 'm')  # convert days to minutes
-        diff_vtec = np.diff(group_vtec)
-        rates.extend(diff_vtec / dt_min)
+    order = np.lexsort((e, inv))
+    e = e[order]; v = v[order]; inv = inv[order]
 
-    return np.std(rates) if rates else np.nan
+    same_group = inv[1:] == inv[:-1]
+    if not np.any(same_group):
+        return np.nan
 
-def main_processing_pipeline(df_altimetry: pd.DataFrame, df_doris: pd.DataFrame, settings):
+    dt_min = (e[1:] - e[:-1]) / np.timedelta64(1, 'm')
+    dvtec  = v[1:] - v[:-1]
 
+    dt_min = dt_min.astype(float)
+    valid = same_group & np.isfinite(dt_min) & (dt_min > 0)
+    if not np.any(valid):
+        return np.nan
+
+    rates = dvtec[valid] / dt_min[valid]
+    rates = rates[np.isfinite(rates)]
+    return np.std(rates) if rates.size else np.nan
+
+# --- Main routine ---
+def altimetry_inpo(df_altimetry, df_doris, settings):
+    
     df_doris = df_doris[df_doris['elevation'] > settings['ele_mask']].reset_index(drop=True)
 
-    ns_altimetry = df_altimetry.to_records(index=False) # from dataframe to numpy stuructured array
-    ns_doris = df_doris.to_records(index=False) 
-    length = len(ns_altimetry)
+    # --- Prepare output columns ---
+    df_altimetry = df_altimetry.copy()
+    df_altimetry['doris_vtec'] = np.nan
+    df_altimetry['doris_points_count'] = 0
+    df_altimetry['doris_points_std'] = np.nan
+    df_altimetry['window_size'] = np.nan
+    df_altimetry['roti'] = np.nan
 
-    doris_vtec = np.full(length, np.nan)
-    doris_points_count = np.full(length, -1, dtype=int)
-    doris_points_std = np.full(length, np.nan)
-    window_size = np.full(length, np.nan)
-    roti_list = np.full(length, np.nan)
+    # --- Constants ---
+    OMEGA = const.omega
+    SEC = np.timedelta64(1, 's')
+    min_distance = float(settings['min_distance'])
+    max_distance = float(settings['max_distance'])
+    min_obs = int(settings['min_obs_count'])
 
-    for idx, row in enumerate(ns_altimetry):
+    # --- Per altimetry IPP ---
+    for i, alt_row in df_altimetry.iterrows():
+        lat0, lon0, t0 = alt_row['ipp_lat'], alt_row['ipp_lon'] % 360.0, alt_row['obs_epoch']
 
-        lat, lon = row['ipp_lat'], row['ipp_lon'] % 360
-
-        # --- Time filtering ---
-        time_diff_sec = np.abs((df_doris['obs_epoch'] - row['obs_epoch']) / np.timedelta64(1, 's'))
-        time_mask = time_diff_sec < 400
-
-        if np.count_nonzero(time_mask) < settings['min_obs_count']:
+        # --- Time filter (|Δt| < 400 s) ---
+        dt_sec = ((df_doris['obs_epoch'] - t0) / SEC).abs().astype(float)
+        df_time = df_doris.loc[dt_sec < 400.0].reset_index(drop=True)
+        if len(df_time) < min_obs:
             continue
 
-        ns_doris_time = ns_doris[time_mask]
-
         # --- Earth rotation correction ---
-        omega = const.omega
-        delta_t = (ns_doris_time['obs_epoch'] - row['obs_epoch']) / np.timedelta64(1, 's')
-        delta_lon_deg = np.degrees(omega * delta_t)
-        corrected = ns_doris_time['ipp_lon'] + delta_lon_deg
-        ns_doris_time['ipp_lon'] = corrected % 360
+        delta_t = (df_time['obs_epoch'] - t0) / SEC
+        dlon_deg = np.degrees(OMEGA * delta_t)
+        df_time = df_time.assign(ipp_lon_corr=(df_time['ipp_lon'] + dlon_deg) % 360.0)
 
-        # --- ROTI calculation ---
-        roti = compute_roti(ns_doris_time, row['obs_epoch'], settings['roti_sec_gap'])
-        roti_list[idx] = roti
+        # --- Compute ROTI ---
+        roti_val = compute_roti(
+            epoch=df_time['obs_epoch'],
+            vtec=df_time['VTEC'],
+            station_code=df_time['station_code'],
+            pass_id=df_time['pass_id'],
+            ref_epoch=t0
+        )
+        df_altimetry.at[i, 'roti'] = roti_val
 
-        # --- Window search & interpolation ---
-        if roti < settings['roti_threshold']:
-            lat_gap = settings['lat_gap_lf']
-            lon_gap_km = lat_gap * 2 * 111
-            while lat_gap <= settings['max_lat_gap_lf']:
-                lon_deg_diff = np.abs((ns_doris_time['ipp_lon'] - lon + 180) % 360 - 180)
-                lon_km = np.cos(np.radians(ns_doris_time['ipp_lat'])) * 111.0 * lon_deg_diff
-                combined = (np.abs(ns_doris_time['ipp_lat'] - lat) <= lat_gap) & (lon_km <= lon_gap_km)
-                if np.count_nonzero(combined) >= settings['min_obs_count']:
-                    ns_doris_inpo = ns_doris_time[combined]
-                    distances = np.array(haversine_vec(lat, lon, ns_doris_inpo['ipp_lat'], ns_doris_inpo['ipp_lon']))
-                    weighted_vtec = idw(distances, ns_doris_inpo['VTEC'])
-                    doris_vtec[idx] = weighted_vtec
-                    doris_points_std[idx] = np.std(ns_doris_inpo['VTEC'])
-                    window_size[idx] = lat_gap            
-                    break
-                lat_gap += 1
-                lon_gap_km += 2 * 111
-            doris_points_count[idx] = np.count_nonzero(combined)
+        # --- KDTree search in (lat, lon) space converted to unit vectors ---
+        src_vecs = latlon_to_unitvec(df_time['ipp_lat'], df_time['ipp_lon_corr'])
+        target_vec = latlon_to_unitvec([lat0], [lon0])[0]
+        tree = cKDTree(src_vecs)
 
-        elif roti >= settings['roti_threshold']:
-            lat_gap = settings['lat_gap_hf']
-            lon_gap_km = lat_gap * 2 * 111
-            lon_deg_diff = np.abs((ns_doris_time['ipp_lon'] - lon + 180) % 360 - 180)
-            lon_km = np.cos(np.radians(ns_doris_time['ipp_lat'])) * 111.0 * lon_deg_diff
-            combined = (np.abs(ns_doris_time['ipp_lat'] - lat) <= lat_gap) & (lon_km <= lon_gap_km)
-            if np.count_nonzero(combined) >= settings['min_obs_count']:
-                ns_doris_inpo = ns_doris_time[combined]
-                distances = np.array(haversine_vec(lat, lon, ns_doris_inpo['ipp_lat'], ns_doris_inpo['ipp_lon']))
-                weighted_vtec = idw(distances, ns_doris_inpo['VTEC'])
-                doris_vtec[idx] = weighted_vtec
-                doris_points_std[idx] = np.std(ns_doris_inpo['VTEC'])
-                window_size[idx] = lat_gap
+        found = False
+        cnt = 0
+        cur_distance = min_distance
 
-            else:
-                lat_gap = settings['lat_gap_hf_big']
-                lon_gap_km = lat_gap * 2 * 111
-                lon_deg_diff = np.abs((ns_doris_time['ipp_lon'] - lon + 180) % 360 - 180)
-                lon_km = np.cos(np.radians(ns_doris_time['ipp_lat'])) * 111.0 * lon_deg_diff
-                combined = (np.abs(ns_doris_time['ipp_lat'] - lat) <= lat_gap) & (lon_km <= lon_gap_km)
-                if np.count_nonzero(combined) >= settings['min_obs_count']:
-                    ns_doris_inpo = ns_doris_time[combined]
-                    distances = np.array(haversine_vec(lat, lon, ns_doris_inpo['ipp_lat'], ns_doris_inpo['ipp_lon']))
-                    weighted_vtec = idw(distances, ns_doris_inpo['VTEC'])
-                    doris_vtec[idx] = weighted_vtec
-                    doris_points_std[idx] = np.std(ns_doris_inpo['VTEC'])
-                    window_size[idx] = lat_gap
+        while cur_distance <= max_distance:
+            # Query neighbors within current radius (converted to unit-sphere chord)
+            cand_idx = tree.query_ball_point(target_vec, r=cur_distance / const.AE84 * 1000)
+            cnt = len(cand_idx)
 
-            doris_points_count[idx] = np.count_nonzero(combined)
+            if cnt >= min_obs:
+                df_neighbors = df_time.iloc[cand_idx]
+                d_km = haversine_vec(lat0, lon0, df_neighbors['ipp_lat'], df_neighbors['ipp_lon_corr'])
+                vtec_interp = idw(d_km, df_neighbors['VTEC'])
 
-    ns_altimetry_updated = rfn.append_fields(
-        ns_altimetry,
-        names=['doris_vtec', 'doris_points_count', 'doris_points_std', 'window_size', 'roti'],
-        data=[doris_vtec, doris_points_count, doris_points_std, window_size, roti_list],
-        dtypes=['f8', 'i4', 'f8', 'f8', 'f8'],
-        usemask=False
-    )
-    return pd.DataFrame.from_records(ns_altimetry_updated)
+                df_altimetry.at[i, 'doris_vtec'] = vtec_interp
+                df_altimetry.at[i, 'doris_points_std'] = np.nanstd(df_neighbors['VTEC'])
+                df_altimetry.at[i, 'window_size'] = cur_distance
+                found = True
+                break
 
-def split_df_by_time(df, hours_per_chunk=3):
-    df['hour'] = df['obs_epoch'].dt.hour
-    chunks = []
-    for start_hour in range(0, 24, hours_per_chunk):
-        end_hour = start_hour + hours_per_chunk
-        chunk = df[(df['hour'] >= start_hour) & (df['hour'] < end_hour)].copy()
-        chunks.append(chunk)
-    df.drop(columns='hour', inplace=True) 
-    return chunks
+            cur_distance += 100.0  # km step
+
+        df_altimetry.at[i, 'doris_points_count'] = cnt if found else 0
+
+    return df_altimetry
+
+def altimetry_distance_mask(df_altimetry, sta_xyz, max_km):
+    R = const.AE84 
+    lat = np.radians(df_altimetry['ipp_lat'].to_numpy())
+    lon = np.radians(df_altimetry['ipp_lon'].to_numpy())
+    ipp_xyz = np.column_stack([
+        R * np.cos(lat) * np.cos(lon),
+        R * np.cos(lat) * np.sin(lon),
+        R * np.sin(lat)
+    ])
+    tree = cKDTree(sta_xyz)
+    d, _ = tree.query(ipp_xyz, k=2)
+    mask = ((d[:,0]+d[:,1])<= max_km*2*1000)
+    return df_altimetry.loc[mask].copy()
 
 # Main processing
 if __name__ == '__main__':
     start_time = time.time()
 
+    gim_dir = Path("/Volumes/T7Shield/DORISData/DORISInput/IGSGIM")
+    doris_vtec_dir = Path("/Volumes/T7Shield/DORISData/DORISVTECStorage")
+    alt_vtec_dir = Path("/Volumes/T7Shield/AltimetryData/AltimetryVTECStorage")
+    dbav_dir = Path("/Volumes/T7Shield/DORISData/DBAVStorage")
+    station_dir = Path("/Volumes/T7Shield/DORISData/StationCoord")
+
     proc_sate = satellite_list[1]
     range_ratio = range_ratio_list[0]
+    mean_dist_stations = 1800  # km
 
-    start_date = datetime(2019, 11, 30)
-    num_days = 30
+    start_date = datetime(2024, 1, 1)
+    proc_days = 1
     settings = {
         'ele_mask': 10,
-        'roti_threshold': 1, 
-        'roti_sec_gap': 150,
         'min_obs_count': 30,
-        'lat_gap_lf': 1,
-        'max_lat_gap_lf': 10,
-        'lat_gap_hf': 6,
-        'lat_gap_hf_big': 10
+        'min_distance': 300,    # km
+        'max_distance': 1000,   # km
     }
 
-    for day_offset in range(num_days):
+    for day_offset in range(proc_days):
         date = start_date + timedelta(days=day_offset)
         year, month, day = date.year, date.month, date.day
         doy = date.timetuple().tm_yday
 
-        with open(f'./DORISVTECStorage/{proc_sate}/{year}/DOY{doy:03d}.pickle', 'rb') as path:
-            df_doris = pickle.load(path)
-
-        with open(f'./AltimetryVTECStorage/{proc_sate}/{year}/DOY{doy:03d}.pickle', 'rb') as path:
-            df_altimetry = pickle.load(path)
-
-        ion_file = (
-            f"./DORISInput/IGSGIM/{year}/igsg{doy:03d}0.{str(year)[-2:]}i"
-            if year <= 2022 else
-            f"./DORISInput/IGSGIM/{year}/IGS0OPSFIN_{year}{doy:03d}0000_01D_02H_GIM.INX"
-        )
+        df_doris = pd.read_pickle(doris_vtec_dir / f"{proc_sate}/{year}/DOY{doy:03d}.pkl")
+        df_altimetry = pd.read_pickle(alt_vtec_dir / f"{proc_sate}/{year}/DOY{doy:03d}.pkl")
+        df_station = pd.read_pickle(station_dir / f"{year}" / f"DOY{doy:03d}.pkl")
+        mask = df_station['station_code'].isin(df_doris['station_code'])
+        df_matched = df_station.loc[mask, ['station_code', 'sta_x', 'sta_y', 'sta_z']].reset_index(drop=True)
+        df_altimetry = altimetry_distance_mask(df_altimetry, df_matched[['sta_x', 'sta_y', 'sta_z']], mean_dist_stations)
 
         # --- GIM VTEC computation & comparison with Altimetry VTEC ---
-        gim_vtec_raw = read_ionFile(ion_file)
+        ion_file = get_gim_filename(gim_dir, year, doy)
+        gim_vtec_raw = read_ionFile(str(ion_file))
         gim_vtec_scaled = gim_vtec_raw[:, ::-1, :] * 0.1
         gim_vtec_interp = get_igs_vtec(gim_vtec_scaled, df_altimetry)
         gim_vtec_diff = df_altimetry['VTEC'] - gim_vtec_interp * range_ratio
+        gim_vtec_std = np.std(gim_vtec_diff)
         gim_vtec_rms = np.sqrt(np.mean(gim_vtec_diff ** 2))
+        print(f"GIM VTEC - Std: {gim_vtec_std:.2f}, RMS: {gim_vtec_rms:.2f}")
 
-        # --- DORIS VTEC computation & comparison with Altimetry VTEC ---
-        chunks = split_df_by_time(df_altimetry)
+        # --- DORIS VTEC interpolation (parallel processing) ---
+        df_altimetry = df_altimetry.copy()
+        df_altimetry['_orig_idx'] = df_altimetry.index
+
+        n_parts = 10
+        chunks = _split_df(df_altimetry, n_parts)
         results = []
-        with ProcessPoolExecutor(max_workers=8) as executor:
-            futures = [executor.submit(main_processing_pipeline, chunk, df_doris, settings) for chunk in chunks]
+        with ProcessPoolExecutor(max_workers=n_parts) as executor:
+            futures = [executor.submit(altimetry_inpo, chunk, df_doris, settings) for chunk in chunks]
             for future in as_completed(futures):
-                result_df = future.result()
-                results.append(result_df)
-        df_doris_result = pd.concat(results, ignore_index=True)
-        df_doris_result = df_doris_result.sort_values('obs_epoch').reset_index(drop=True)
-        lon_adjusted = (df_doris_result['ipp_lon'] + 180) % 360 - 180 
-        df_doris_result['local_time'] = df_doris_result['obs_epoch'] + pd.to_timedelta(lon_adjusted / 15, unit='h')
-        df_doris_result.drop(columns='hour', inplace=True)
+                results.append(future.result())
+        df_doris_result = pd.concat(results, axis=0)
+        df_doris_result = df_doris_result.sort_values('_orig_idx').drop(columns=['_orig_idx'])
 
+        # --- Comparison ---
+        doris_vtec_diff = df_altimetry['VTEC'] - df_doris_result['doris_vtec']
+        percent = np.count_nonzero(~np.isnan(doris_vtec_diff)) / len(doris_vtec_diff)
+        doris_vtec_std = np.std(doris_vtec_diff)
+        doris_vtec_rms = np.sqrt(np.mean(doris_vtec_diff ** 2))
+        print(f"DORIS VTEC - Percent: {percent:.2%}, Std: {doris_vtec_std:.2f}, RMS: {doris_vtec_rms:.2f}")
         df_doris_result['gim_vtec'] = gim_vtec_interp
+        df_doris_result.to_pickle(dbav_dir / f"{proc_sate}/{year}/DOY{doy}Ele{settings['ele_mask']}.pkl")
 
-        df_doris_result.to_pickle(f"./DORISInpoOutput/{year}/DOY{doy}Ele{settings['ele_mask']}.pkl")
-        # df_doris_result.to_csv(f"./DORISInpoOutput/{year}/DOY{doy}Ele{settings['ele_mask']}.csv")
-
-
-        # roti_mean = np.mean(df_doris_result['roti'])
-        # vtec_mean = np.mean(df_doris_result['doris_vtec'])
-        # doris_vtec_diff = df_doris_result['VTEC'] - df_doris_result['doris_vtec']
-
-        # non_nan_indices = np.where(~np.isnan(doris_vtec_diff.values))[0]
-        # doris_vtec_rms = np.sqrt(np.mean(doris_vtec_diff[non_nan_indices] ** 2))
-        # gim_vtec_rms_doris = np.sqrt(np.mean(gim_vtec_diff[non_nan_indices] ** 2))
-
-        # print(doris_vtec_rms, gim_vtec_rms_doris, len(doris_vtec_diff[non_nan_indices]), len(non_nan_indices)/len(doris_vtec_diff))
-
-
-        
     print(f"Elapsed time: {time.time() - start_time:.2f} seconds")

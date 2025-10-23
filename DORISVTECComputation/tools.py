@@ -1,6 +1,7 @@
 import numpy as np
-import math
 import pandas as pd
+from pathlib import Path
+import constant
 from scipy.interpolate import RegularGridInterpolator
 from numba import njit
 
@@ -28,8 +29,9 @@ def get_igs_vtec(GIMVTEC: list[np.ndarray], df_max: pd.DataFrame) -> np.ndarray:
         for i in range(13)
     ]
 
+    mapped_lon = (df_max['ipp_lon'] + 180) % 360 - 180
     lat_idx = (df_max['ipp_lat'] + 87.5) / 2.5
-    lon_idx = (df_max['ipp_lon'] + 180) / 5
+    lon_idx = (mapped_lon + 180) / 5
 
     epoch = pd.to_datetime(df_max['obs_epoch'])
     t_idx = epoch.dt.hour // 2
@@ -42,48 +44,33 @@ def get_igs_vtec(GIMVTEC: list[np.ndarray], df_max: pd.DataFrame) -> np.ndarray:
     
     return (1 - t_scale) * vtec1 + t_scale * vtec2
 
-def trop_saa(pos, elev, humi):
-    """
-    Calculates tropospheric delay correction using Saastamoinen model.
-    
-    Inputs:
-    pos: Receiver position (longitude, latitude, altitude).
-    azel: Azimuth and elevation of the satellite relative to the receiver.
-    humi: Relative humidity (percentage).
-    
-    Outputs:
-    troperr: Tropospheric delay correction value.
-    """
-    
-    # Constants
-    temp0 = 15.0  # Temperature in Celsius
-    
-    # Check conditions for invalid inputs
-    if pos[2] < -100 or pos[2] > 10000 or elev <= 0:
-        troperr = 0
-        return troperr
-    
-    # Calculate pressure (pres), temperature (temp), and water vapor pressure (e)
-    if pos[2] < 0:
-        hgt = 0
-    else:
-        hgt = pos[2]
-        
-    pres = 1013.25 * (1.0 - 2.2557E-5 * hgt)**5.2568
-    temp = temp0 - 6.5E-3 * hgt + 273.16
-    e = 6.108 * humi * math.exp((17.15 * temp - 4684.0) / (temp - 38.45))
-    
-    # Calculate zenith distance (z)
-    z = math.pi / 2.0 - math.radians(elev)
-    
-    # Dry tropospheric delay correction (trph)
-    trph = 0.0022768 * pres / (1.0 - 0.00266 * math.cos(2.0 * math.radians(pos[0])) - 0.00028 * hgt / 1E3) / math.cos(z)
-    
-    # Wet tropospheric delay correction (trpw)
-    trpw = 0.002277 * (1255.0 / temp + 0.05) * e / math.cos(z)
-    
-    # Total tropospheric delay correction
-    troperr = trph + trpw
-    
-    return troperr
+def haversine_vec(lat1, lon1, lat2_array, lon2_array, R=constant.AE84+506700):
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2_array)
+    dphi = np.radians(lat2_array - lat1)
+    dlambda = np.radians(lon2_array - lon1)
+    a = np.sin(dphi / 2)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2)**2
+    return 2 * R * np.arcsin(np.sqrt(a))
 
+def idw(distances, values, power=2):
+
+    distances = np.asarray(distances)
+    values = np.asarray(values)
+    if np.any(distances == 0):
+        return values[distances == 0][0]
+
+    weights = 1 / distances**power
+    weighted_sum = np.sum(weights * values)
+    sum_weights = np.sum(weights)
+
+    return weighted_sum / sum_weights
+
+def get_gim_filename(gim_dir: Path, year: int, doy: int) -> str:
+
+    gim_dir_year = gim_dir / f"{year}"
+    file_list = [f.name for f in gim_dir_year.iterdir() if f.is_file()]
+    inx_file = next((f for f in file_list if f.startswith(f"IGS0OPSFIN_{year}{doy:03d}") and f.endswith("GIM.INX")), None)
+    igsg_file = next((f for f in file_list if f.startswith(f"igsg{doy:03d}0.{str(year % 100).zfill(2)}i")), None)
+    ion_file = inx_file or igsg_file
+
+    return gim_dir_year / ion_file
