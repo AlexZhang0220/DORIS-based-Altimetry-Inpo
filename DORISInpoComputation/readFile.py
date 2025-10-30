@@ -705,7 +705,6 @@ def read_ionFile(IonFile):
     # check if observationFile exists or not
     isexist(IonFile)
     # ----------------------------------------------
-    start = time.time()  
     f = open(IonFile, errors = 'ignore')
     obsLines = f.readlines() 
 
@@ -714,7 +713,9 @@ def read_ionFile(IonFile):
         if 'END OF HEADER' in obsLines[line]:
             line +=1
             break
-        else:
+        else: 
+            if 'EXPONENT' in obsLines[line]:
+                exponent = obsLines[line].split()[0]
             line +=1
     
     del obsLines[0:line]
@@ -739,9 +740,8 @@ def read_ionFile(IonFile):
         del obsLines[0]
         #---------------------------------------------------------------------------------------
     f.close() # close the file
-    finish = time.time()
-
-    return tecuList
+    # print("Ionosphere file ", IonFile," is read in", "{0:.2f}".format(finish-start), "seconds.")
+    return tecuList[:, ::-1, :] * 10 ** int(exponent)
 
 def read_ionRMSFile(IonFile):
     """ Function that reads Ionosphere file """

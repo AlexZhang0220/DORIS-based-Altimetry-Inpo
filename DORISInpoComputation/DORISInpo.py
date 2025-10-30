@@ -3,7 +3,7 @@ import pandas as pd
 import os
 import re
 from datetime import datetime, timedelta
-from tools import get_igs_vtec, haversine_vec, idw, get_gim_filename, latlon_to_unitvec
+import tools
 from readFile import read_ionFile
 from pathlib import Path
 from scipy.spatial import cKDTree
@@ -120,8 +120,8 @@ def altimetry_inpo(df_altimetry, df_doris, settings):
             df_altimetry.at[i, 'roti'] = roti_val
 
         # --- KDTree search in (lat, lon) space converted to unit vectors ---
-        src_vecs = latlon_to_unitvec(df_time['ipp_lat'], df_time['ipp_lon_corr'])
-        target_vec = latlon_to_unitvec([lat0], [lon0])[0]
+        src_vecs = tools.latlon_to_unitvec(df_time['ipp_lat'], df_time['ipp_lon_corr'])
+        target_vec = tools.latlon_to_unitvec([lat0], [lon0])[0]
         tree = cKDTree(src_vecs)
 
         found = False
@@ -135,9 +135,9 @@ def altimetry_inpo(df_altimetry, df_doris, settings):
 
             if cnt >= min_obs:
                 df_neighbors = df_time.iloc[cand_idx]
-                d_km = haversine_vec(lat0, lon0, df_neighbors['ipp_lat'], df_neighbors['ipp_lon_corr'])
-                vtec_interp = idw(d_km, df_neighbors['VTEC'])
-
+                d_km = tools.haversine_vec(lat0, lon0, df_neighbors['ipp_lat'], df_neighbors['ipp_lon_corr'])
+                # vtec_interp = tools.idw(d_km, df_neighbors['VTEC'])
+                vtec_interp = tools.predict_alt_vtec_doris(lat0, lon0, t0, df_neighbors['ipp_lat'], df_neighbors['ipp_lon_corr'], df_neighbors['obs_epoch'], df_neighbors['VTEC'])[0]
                 df_altimetry.at[i, 'doris_vtec'] = vtec_interp
                 df_altimetry.at[i, 'doris_points_std'] = np.nanstd(df_neighbors['VTEC'])
                 df_altimetry.at[i, 'window_size'] = cur_distance
@@ -223,7 +223,7 @@ if __name__ == '__main__':
     settings = {
         'ele_mask': 10,
         'min_obs_count': 30,
-        'min_distance': 800,    # km
+        'min_distance': 400,    # km
         'max_distance': 1000,   # km
         'distance_step': 200,   # km
         'enable_roti_flag': False
@@ -250,26 +250,24 @@ if __name__ == '__main__':
         mask = df_station['station_code'].isin(df_doris['station_code'])
         df_matched = df_station.loc[mask, ['station_code', 'sta_x', 'sta_y', 'sta_z']].reset_index(drop=True)
 
-        start = pd.Timestamp('2016-03-12 22:51:41')
-        end   = pd.Timestamp('2016-03-12 23:47:53')
-
+        start_epoch = pd.Timestamp("2016-03-12 22:51:41") 
+        end_epoch = pd.Timestamp("2016-12-31 23:47:53")
         df_altimetry_masked = df_altimetry[
-            (df_altimetry['obs_epoch'] >= start) &
-            (df_altimetry['obs_epoch'] <= end)
+            (df_altimetry['obs_epoch'] >= start_epoch) &
+            (df_altimetry['obs_epoch'] <= end_epoch)        
         ]
         # df_altimetry_masked = altimetry_distance_mask(df_altimetry, df_matched[['sta_x', 'sta_y', 'sta_z']], mean_dist_stations)
 
         # --- GIM VTEC computation & comparison with Altimetry VTEC ---
-        ion_file = get_gim_filename(gim_dir, year, doy)
-        gim_vtec_raw = read_ionFile(str(ion_file))
-        gim_vtec = gim_vtec_raw[:, ::-1, :] * 0.1
-        gim_vtec_interp = get_igs_vtec(gim_vtec, df_altimetry_masked) # gim data integrated after doris processing
+        ion_file = tools.get_gim_filename(gim_dir, year, doy)
+        gim_vtec = read_ionFile(str(ion_file))
+        gim_vtec_interp = tools.get_igs_vtec(gim_vtec, df_altimetry_masked) # gim data integrated after doris processing
 
         # --- DORIS VTEC interpolation (parallel processing) ---
         df_altimetry_masked = df_altimetry_masked.copy()
         df_altimetry_masked['_orig_idx'] = df_altimetry_masked.index
 
-        n_parts = 10
+        n_parts = 1
         chunks = _split_df(df_altimetry_masked, n_parts)
         results = []
         with ProcessPoolExecutor(max_workers=n_parts) as executor:

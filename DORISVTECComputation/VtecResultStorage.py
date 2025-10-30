@@ -91,8 +91,7 @@ if __name__ == '__main__':
             continue
 
         # --- Read GIM data and compute IGS VTEC ---
-        gim_vtec = read_ionFile(str(ion_file)) * 0.1
-        gim_vtec = gim_vtec[:, ::-1, :]  # Flip longitude direction
+        gim_vtec = read_ionFile(str(ion_file))
 
         # --- Get maximum elevation point for each pass ---
         max_elev_idx = passes_all_stations.groupby(['station_code', 'pass_id'])['elevation'].idxmax()
