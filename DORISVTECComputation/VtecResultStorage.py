@@ -4,6 +4,7 @@ from readFile import read_ionFile
 from pathlib import Path
 from tqdm.auto import tqdm
 import time
+import os
 import pandas as pd
 
 # === Configuration ===
@@ -34,8 +35,8 @@ if __name__ == '__main__':
     vtec_dir = Path("/Volumes/T7Shield/DORISData/DORISVTECStorage")
 
     # === Processing parameters ===
-    start_date = pd.Timestamp(2024, 1, 1)
-    proc_days = 1
+    start_date = pd.Timestamp(2016, 1, 1)
+    proc_days = 365
     proc_sate = satellite_list[1]
     min_obs_count = 30    
     elev_thres = 10        
@@ -49,7 +50,6 @@ if __name__ == '__main__':
 
     # === Main processing loop ===
     pbar = tqdm(range(proc_days), desc="VTEC Leveling", unit="day")
-
     for day_offset in pbar:
         process_epoch = start_date + pd.Timedelta(days=day_offset)
         year, doy = process_epoch.year, process_epoch.dayofyear
@@ -67,7 +67,10 @@ if __name__ == '__main__':
             .drop_duplicates(subset='station_code')
             .reset_index(drop=True)
         )
-        df_station_unique.to_pickle(Path(f"/Volumes/T7Shield/DORISData/StationCoord/{year}") / f"DOY{doy:03d}.pkl")
+
+        save_dir = Path(f"/Volumes/T7Shield/DORISData/StationCoord/{year}")
+        os.makedirs(save_dir, exist_ok=True)
+        df_station_unique.to_pickle(save_dir / f"DOY{doy:03d}.pkl")
         
         # --- Detect and separate passes for all stations ---
         passes_all_stations = []

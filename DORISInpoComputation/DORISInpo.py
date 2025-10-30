@@ -1,11 +1,14 @@
 import numpy as np
 import pandas as pd
+import os
+import re
 from datetime import datetime, timedelta
 from tools import get_igs_vtec, haversine_vec, idw, get_gim_filename, latlon_to_unitvec
 from readFile import read_ionFile
 from pathlib import Path
 from scipy.spatial import cKDTree
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm.auto import tqdm
 import constant as const
 import time
 
@@ -29,10 +32,10 @@ def compute_roti(epoch, vtec, station_code, pass_id, ref_epoch, time_gap_sec=150
     if np.count_nonzero(in_win) < 2:
         return np.nan
 
-    e  = epoch[in_win]
-    v  = vtec[in_win]
-    st = station_code[in_win]
-    ps = pass_id[in_win]
+    e  = epoch[in_win].to_numpy()
+    v  = vtec[in_win].to_numpy()
+    st = station_code[in_win].to_numpy()
+    ps = pass_id[in_win].to_numpy()
 
     df_pairs = pd.DataFrame({'st': st, 'ps': ps})
     _, inv = np.unique(df_pairs[['st', 'ps']].apply(tuple, axis=1), return_inverse=True)
@@ -56,9 +59,23 @@ def compute_roti(epoch, vtec, station_code, pass_id, ref_epoch, time_gap_sec=150
     rates = rates[np.isfinite(rates)]
     return np.std(rates) if rates.size else np.nan
 
+def altimetry_distance_mask(df_altimetry, sta_xyz, max_km):
+    R = const.AE84 
+    lat = np.radians(df_altimetry['ipp_lat'].to_numpy())
+    lon = np.radians(df_altimetry['ipp_lon'].to_numpy())
+    ipp_xyz = np.column_stack([
+        R * np.cos(lat) * np.cos(lon),
+        R * np.cos(lat) * np.sin(lon),
+        R * np.sin(lat)
+    ])
+    tree = cKDTree(sta_xyz)
+    d, _ = tree.query(ipp_xyz, k=2)
+    mask = ((d[:,0]+d[:,1])<= max_km*2*1000)
+    return df_altimetry.loc[mask].copy()
+
 # --- Main routine ---
 def altimetry_inpo(df_altimetry, df_doris, settings):
-    
+
     df_doris = df_doris[df_doris['elevation'] > settings['ele_mask']].reset_index(drop=True)
 
     # --- Prepare output columns ---
@@ -92,14 +109,15 @@ def altimetry_inpo(df_altimetry, df_doris, settings):
         df_time = df_time.assign(ipp_lon_corr=(df_time['ipp_lon'] + dlon_deg) % 360.0)
 
         # --- Compute ROTI ---
-        roti_val = compute_roti(
-            epoch=df_time['obs_epoch'],
-            vtec=df_time['VTEC'],
-            station_code=df_time['station_code'],
-            pass_id=df_time['pass_id'],
-            ref_epoch=t0
-        )
-        df_altimetry.at[i, 'roti'] = roti_val
+        if settings['enable_roti_flag']:
+            roti_val = compute_roti(
+                epoch=df_time['obs_epoch'],
+                vtec=df_time['VTEC'],
+                station_code=df_time['station_code'],
+                pass_id=df_time['pass_id'],
+                ref_epoch=t0
+            )
+            df_altimetry.at[i, 'roti'] = roti_val
 
         # --- KDTree search in (lat, lon) space converted to unit vectors ---
         src_vecs = latlon_to_unitvec(df_time['ipp_lat'], df_time['ipp_lon_corr'])
@@ -126,25 +144,64 @@ def altimetry_inpo(df_altimetry, df_doris, settings):
                 found = True
                 break
 
-            cur_distance += 100.0  # km step
+            cur_distance += settings['distance_step']  # km 
 
         df_altimetry.at[i, 'doris_points_count'] = cnt if found else 0
 
     return df_altimetry
 
-def altimetry_distance_mask(df_altimetry, sta_xyz, max_km):
-    R = const.AE84 
-    lat = np.radians(df_altimetry['ipp_lat'].to_numpy())
-    lon = np.radians(df_altimetry['ipp_lon'].to_numpy())
-    ipp_xyz = np.column_stack([
-        R * np.cos(lat) * np.cos(lon),
-        R * np.cos(lat) * np.sin(lon),
-        R * np.sin(lat)
-    ])
-    tree = cKDTree(sta_xyz)
-    d, _ = tree.query(ipp_xyz, k=2)
-    mask = ((d[:,0]+d[:,1])<= max_km*2*1000)
-    return df_altimetry.loc[mask].copy()
+# --- Result storage and comparison ---
+def doris_result_comparison(year, doris_result_dir, altimetry_vtec_dir, comparison_dir):
+
+    doris_path = Path(doris_result_dir/str(year))
+    alt_path = Path(altimetry_vtec_dir/str(year))
+
+    def extract_doy_key(name: str):
+        m = re.search(r'DOY(\d{3})', name)
+        return f"DOY{m.group(1)}" if m else None
+
+    results = []
+    doris_files = sorted(
+        f for f in doris_path.glob("*.pkl")
+        if not f.name.startswith("._")
+    )
+
+    for f in doris_files:
+        doy_key = extract_doy_key(f.name)
+        df_doris = pd.read_pickle(f)
+        if not all(col in df_doris.columns for col in ["VTEC", "doris_vtec", "gim_vtec"]):
+            continue
+
+        # Compute stats
+        diff_doris = df_doris["VTEC"] - df_doris["doris_vtec"]
+        diff_gim   = df_doris["VTEC"] - df_doris["gim_vtec"] * range_ratio_list[0]
+
+        rms_doris = float(np.sqrt(np.nanmean(np.square(diff_doris)))) if len(diff_doris) else np.nan
+        std_doris = float(np.nanstd(diff_doris)) if len(diff_doris) else np.nan
+        rms_gim   = float(np.sqrt(np.nanmean(np.square(diff_gim)))) if len(diff_gim) else np.nan
+        std_gim   = float(np.nanstd(diff_gim)) if len(diff_gim) else np.nan
+
+        # Find altimetry file
+        alt_files = list(f for f in alt_path.glob(f"*{doy_key}*.pkl") if not f.name.startswith("._"))
+        df_alt = pd.read_pickle(alt_files[0])
+        n_alt = len(df_alt)
+        n_doris = len(df_doris)
+        percentage = n_doris / n_alt if n_alt and not np.isnan(n_alt) else np.nan
+
+        results.append({
+            "doy": doy_key,
+            "n_doris": n_doris,
+            "n_alt": n_alt,
+            "percentage": percentage,
+            "rms_doris": rms_doris,
+            "std_doris": std_doris,
+            "rms_gim": rms_gim,
+            "std_gim": std_gim
+        })
+
+    summary = pd.DataFrame(results).sort_values("doy").reset_index(drop=True)
+    summary.to_csv(comparison_dir / f"{year}_comparison_summary.csv", index=False, float_format="%.4f")
+    print(f"Comparison summary saved to {comparison_dir / f'{year}_comparison_summary.csv'}")
 
 # Main processing
 if __name__ == '__main__':
@@ -155,48 +212,65 @@ if __name__ == '__main__':
     alt_vtec_dir = Path("/Volumes/T7Shield/AltimetryData/AltimetryVTECStorage")
     dbav_dir = Path("/Volumes/T7Shield/DORISData/DBAVStorage")
     station_dir = Path("/Volumes/T7Shield/DORISData/StationCoord")
+    result_dir = Path("/Volumes/T7Shield/DORISData/ComparisonResults")
 
     proc_sate = satellite_list[1]
     range_ratio = range_ratio_list[0]
-    mean_dist_stations = 1800  # km
+    mean_dist_stations = 1700   # km
 
-    start_date = datetime(2024, 1, 1)
+    start_date = datetime(2016, 3, 12)
     proc_days = 1
     settings = {
         'ele_mask': 10,
         'min_obs_count': 30,
-        'min_distance': 300,    # km
+        'min_distance': 800,    # km
         'max_distance': 1000,   # km
+        'distance_step': 200,   # km
+        'enable_roti_flag': False
     }
 
-    for day_offset in range(proc_days):
+    pbar = tqdm(range(proc_days), desc="DORIS Interpolation", unit="day")
+    for day_offset in pbar:
         date = start_date + timedelta(days=day_offset)
         year, month, day = date.year, date.month, date.day
         doy = date.timetuple().tm_yday
 
-        df_doris = pd.read_pickle(doris_vtec_dir / f"{proc_sate}/{year}/DOY{doy:03d}.pkl")
-        df_altimetry = pd.read_pickle(alt_vtec_dir / f"{proc_sate}/{year}/DOY{doy:03d}.pkl")
-        df_station = pd.read_pickle(station_dir / f"{year}" / f"DOY{doy:03d}.pkl")
+        doris_file = Path(doris_vtec_dir) / f"{proc_sate}/{year}/DOY{doy:03d}.pkl"
+        alt_file = Path(alt_vtec_dir) / f"{proc_sate}/{year}/DOY{doy:03d}.pkl"
+        sta_file = Path(station_dir) / f"{year}/DOY{doy:03d}.pkl"
+
+        if not (doris_file.exists() and alt_file.exists() and sta_file.exists()):
+            print(f"Skip DOY{doy:03d} — file not found")
+            continue
+
+        # Safely read pickle files
+        df_doris = pd.read_pickle(doris_file)
+        df_altimetry = pd.read_pickle(alt_file)
+        df_station = pd.read_pickle(sta_file)
         mask = df_station['station_code'].isin(df_doris['station_code'])
         df_matched = df_station.loc[mask, ['station_code', 'sta_x', 'sta_y', 'sta_z']].reset_index(drop=True)
-        df_altimetry = altimetry_distance_mask(df_altimetry, df_matched[['sta_x', 'sta_y', 'sta_z']], mean_dist_stations)
+
+        start = pd.Timestamp('2016-03-12 22:51:41')
+        end   = pd.Timestamp('2016-03-12 23:47:53')
+
+        df_altimetry_masked = df_altimetry[
+            (df_altimetry['obs_epoch'] >= start) &
+            (df_altimetry['obs_epoch'] <= end)
+        ]
+        # df_altimetry_masked = altimetry_distance_mask(df_altimetry, df_matched[['sta_x', 'sta_y', 'sta_z']], mean_dist_stations)
 
         # --- GIM VTEC computation & comparison with Altimetry VTEC ---
         ion_file = get_gim_filename(gim_dir, year, doy)
         gim_vtec_raw = read_ionFile(str(ion_file))
-        gim_vtec_scaled = gim_vtec_raw[:, ::-1, :] * 0.1
-        gim_vtec_interp = get_igs_vtec(gim_vtec_scaled, df_altimetry)
-        gim_vtec_diff = df_altimetry['VTEC'] - gim_vtec_interp * range_ratio
-        gim_vtec_std = np.std(gim_vtec_diff)
-        gim_vtec_rms = np.sqrt(np.mean(gim_vtec_diff ** 2))
-        print(f"GIM VTEC - Std: {gim_vtec_std:.2f}, RMS: {gim_vtec_rms:.2f}")
+        gim_vtec = gim_vtec_raw[:, ::-1, :] * 0.1
+        gim_vtec_interp = get_igs_vtec(gim_vtec, df_altimetry_masked) # gim data integrated after doris processing
 
         # --- DORIS VTEC interpolation (parallel processing) ---
-        df_altimetry = df_altimetry.copy()
-        df_altimetry['_orig_idx'] = df_altimetry.index
+        df_altimetry_masked = df_altimetry_masked.copy()
+        df_altimetry_masked['_orig_idx'] = df_altimetry_masked.index
 
         n_parts = 10
-        chunks = _split_df(df_altimetry, n_parts)
+        chunks = _split_df(df_altimetry_masked, n_parts)
         results = []
         with ProcessPoolExecutor(max_workers=n_parts) as executor:
             futures = [executor.submit(altimetry_inpo, chunk, df_doris, settings) for chunk in chunks]
@@ -204,14 +278,12 @@ if __name__ == '__main__':
                 results.append(future.result())
         df_doris_result = pd.concat(results, axis=0)
         df_doris_result = df_doris_result.sort_values('_orig_idx').drop(columns=['_orig_idx'])
-
-        # --- Comparison ---
-        doris_vtec_diff = df_altimetry['VTEC'] - df_doris_result['doris_vtec']
-        percent = np.count_nonzero(~np.isnan(doris_vtec_diff)) / len(doris_vtec_diff)
-        doris_vtec_std = np.std(doris_vtec_diff)
-        doris_vtec_rms = np.sqrt(np.mean(doris_vtec_diff ** 2))
-        print(f"DORIS VTEC - Percent: {percent:.2%}, Std: {doris_vtec_std:.2f}, RMS: {doris_vtec_rms:.2f}")
         df_doris_result['gim_vtec'] = gim_vtec_interp
-        df_doris_result.to_pickle(dbav_dir / f"{proc_sate}/{year}/DOY{doy}Ele{settings['ele_mask']}.pkl")
 
+        save_dir = dbav_dir / f"{proc_sate}/{mean_dist_stations}km/{year}"
+        os.makedirs(save_dir, exist_ok=True)
+        df_doris_result.to_pickle(save_dir / f"DOY{doy:03d}.pkl")
+
+    # --- Result comparison ---
+    doris_result_comparison(year, dbav_dir/proc_sate/f'{mean_dist_stations}km', alt_vtec_dir/proc_sate, result_dir)
     print(f"Elapsed time: {time.time() - start_time:.2f} seconds")
