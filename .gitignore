@@ -45,6 +45,7 @@
 *.gz
 *.zip
 *.pptx
+*.png
 # -------- 可选保留规则（取消注释即可保留）
 #!README.md
 #!requirements.txt

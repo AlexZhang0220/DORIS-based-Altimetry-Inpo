@@ -51,7 +51,7 @@ if __name__ == '__main__':
     start_time = time.time()
 
     # === Input parameters ===
-    start_date = pd.Timestamp(2016, 1, 1)
+    start_date = pd.Timestamp(2018, 1, 1)
     proc_days = 365
     proc_sate = satellite_list[1]
     end_date = start_date + pd.Timedelta(days=proc_days - 1)

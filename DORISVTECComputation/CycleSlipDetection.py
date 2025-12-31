@@ -103,9 +103,6 @@ def detect_passes(obs_per_station:pd.DataFrame, min_obs_count, elev_thres, colum
     for grouped_obs in grouped_obs_per_station:    
 
         if grouped_obs["L1"].diff().abs().max(skipna=True) > 5e5 and len(grouped_obs["obs_epoch"].dt.date.unique()) == 1:
-        # if len(grouped_obs["obs_epoch"].dt.date.unique()) == 2： np.diff of L1, if large, correct by 4.2e6    
-        # abnormal phase observation: large jumps between epoches
-        # a jump in phase obs is universal in cross-day epoch, only in this case the jump can be tolerated (only one single jump at that one epoch)
             continue
 
         elev_rad = np.deg2rad(grouped_obs['elevation'].values)
