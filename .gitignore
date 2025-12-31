@@ -15,12 +15,20 @@
 /DORISInput/
 /Articles/
 /output/
-/results/
+/Results/
 /data/
 /temp/
 /tmp/
 /cache/
 /logs/
+/visulization/
+/CDDISDownload/
+/DORISGeometryDemo/
+/DORISObsStorage/
+/fig_article/
+/PlotFuncs/
+/solarfluxinfo/
+
 
 # 常见数据文件类型
 *.csv
@@ -36,7 +44,7 @@
 *.pkl
 *.gz
 *.zip
-
+*.pptx
 # -------- 可选保留规则（取消注释即可保留）
 #!README.md
 #!requirements.txt
