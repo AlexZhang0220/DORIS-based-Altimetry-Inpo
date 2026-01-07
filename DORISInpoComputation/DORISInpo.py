@@ -325,7 +325,7 @@ if __name__ == '__main__':
     proc_sate = satellite_list[1]
     range_ratio = range_ratio_list[0]
 
-    cycle_list = list(range(201, 391, 1))
+    cycle_list = list(range(70, 71, 1))
 
     settings = {
         'ele_mask': 10,
@@ -354,12 +354,12 @@ if __name__ == '__main__':
         df_doris_cycle = CycleBasedRead.load_doris_cycle(proc_sate, paths["doris_vtec"], cycle_start, cycle_end)
         df_station_cycle = CycleBasedRead.load_station_cycle(paths["station"], cycle_start, cycle_end)
         gim_cycle = CycleBasedRead.load_gim_cycle(paths["gim"], cycle_start, cycle_end)
-
+        # df_doris_cycle = df_doris_cycle['obs_epoch','ipp_lat','ipp_lon','stec','vtec','elevation','map_value','station_code','prn','pass_id']
         all_pass_results = []
         unique_passes = sorted(df_alt_cycle["pass_in_cycle"].unique())
 
         # --- process each pass of this cycle in parallel ---
-        with ProcessPoolExecutor(max_workers=10) as executor:
+        with ProcessPoolExecutor(max_workers=1) as executor:
             future_to_pid = {
                 executor.submit(
                     process_single_pass,

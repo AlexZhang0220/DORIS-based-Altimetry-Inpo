@@ -8,6 +8,7 @@ import time
 import pandas as pd
 import georinex as gr
 import xarray as xr
+from gnsspy import read_sp3File
 
 def yydoy_to_timestamp(yydoy: int) -> pd.Timestamp:
     year = 2000 + yydoy // 1000
@@ -52,7 +53,7 @@ if __name__ == '__main__':
 
     # === Input parameters ===
     start_date = pd.Timestamp(2018, 1, 1)
-    proc_days = 365
+    proc_days = 1
     proc_sate = satellite_list[1]
     end_date = start_date + pd.Timedelta(days=proc_days - 1)
 
@@ -91,7 +92,7 @@ if __name__ == '__main__':
             y = cur.year
             doy = cur.dayofyear
 
-            rinex_path = rinex_root / f"{y}/{proc_sate}rx{str(y)[-2:]}{doy:03d}.001"
+            rinex_path = rinex_root/f"{y}/{proc_sate}rx{str(y)[-2:]}{doy:03d}.001"
             if not Path(rinex_path).is_file():
                 print(f"RINEX file not found: {rinex_path}, skipping...")
                 cur += pd.Timedelta(days=1)
@@ -101,7 +102,7 @@ if __name__ == '__main__':
             obs = DORISStorage()
             obs.read_rinex_300(rinex_path, orbit_data, stations)
 
-            output_path = obs_dir / f"{y}/DOY{doy:03d}.parquet"
+            output_path = obs_dir/f"{y}/DOY{doy:03d}.parquet"
             output_path.parent.mkdir(parents=True, exist_ok=True)
             obs.storage.to_parquet(output_path, compression="gzip")
 

@@ -8,6 +8,7 @@ import mmap
 import pandas as pd
 import xarray as xr
 import warnings
+from gnsspy import read_obsFile
 
 from dataclasses import dataclass
 @dataclass

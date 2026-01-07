@@ -54,7 +54,7 @@ def haversine_vec(lat1, lon1, lat2_array, lon2_array, R=constant.AE84+506700):
     a = np.sin(dphi / 2)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2)**2
     return 2 * R * np.arcsin(np.sqrt(a))
 
-def idw(distances, values, power=2):
+def idw(distances, values, power=1):
 
     distances = np.asarray(distances)
     values = np.asarray(values)

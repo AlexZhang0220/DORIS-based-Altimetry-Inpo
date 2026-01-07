@@ -28,7 +28,8 @@
 /fig_article/
 /PlotFuncs/
 /solarfluxinfo/
-
+/DORISVTECComputation
+/DORISInpoComputation
 
 # 常见数据文件类型
 *.csv

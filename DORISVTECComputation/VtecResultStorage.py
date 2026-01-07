@@ -131,11 +131,13 @@ def correct_pass_vtec(pass_df, max_row, igs_vtec, range_ratio):
     """
     igs_stec = igs_vtec * max_row['map_value']
     delta = igs_stec * range_ratio - max_row['STEC']
-
+    print(igs_stec, delta)
     corrected_stec = pass_df['STEC'] + delta
     corrected_vtec = corrected_stec / pass_df['map_value']
     # plot_demo_level(pass_df, max_row, corrected_stec)
     pass_df = pass_df.copy()
+    if pass_df.station_code.values[0] == 'AMVB':
+        print('debug')
     pass_df['STEC'] = corrected_stec
     pass_df['VTEC'] = corrected_vtec
     return pass_df
@@ -150,7 +152,7 @@ if __name__ == '__main__':
 
     # === Processing parameters ===
     start_date = pd.Timestamp(2018, 1, 1)
-    proc_days = 365
+    proc_days = 10
     proc_sate = satellite_list[1]
     min_obs_count = 30    
     elev_thres = 10        
@@ -219,7 +221,7 @@ if __name__ == '__main__':
         cor_p_all = []
         for (station_code, pass_id), pass_df in passes_all_stations.groupby(['station_code', 'pass_id']):
             max_row = max_elev_row_dict[(station_code, pass_id)]
-            if max_row.elevation < 60: continue
+            # if max_row.elevation < 60: continue
             igs_vtec = max_row['igs_vtec']
             cor_p = correct_pass_vtec(pass_df, max_row, igs_vtec, range_ratio)
             cor_p_all.append(cor_p)
@@ -228,6 +230,7 @@ if __name__ == '__main__':
 
         # --- Save results ---
         vtec_path = vtec_dir / f"{proc_sate}/{year}/DOY{doy:03d}.pkl"
+
         vtec_path.parent.mkdir(parents=True, exist_ok=True)
         cor_pd_all.to_pickle(vtec_path)
 

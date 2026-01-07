@@ -1,0 +1,15 @@
+import numpy as np
+
+def idw(dist_km, values):
+    """
+    Inverse Distance Weighting (IDW).
+    """
+    dist = np.asarray(dist_km, dtype=float)
+    vals = np.asarray(values, dtype=float)
+
+    mask = np.isfinite(dist) & np.isfinite(vals) & (dist > 0)
+    if not np.any(mask):
+        return np.nan
+
+    w = 1.0 / dist[mask]
+    return np.sum(w * vals[mask]) / np.sum(w)

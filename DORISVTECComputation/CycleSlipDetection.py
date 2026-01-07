@@ -165,7 +165,7 @@ def detect_passes(obs_per_station:pd.DataFrame, min_obs_count, elev_thres, colum
                 seg_start = start + jump_idx[j]
                 seg_end = start + jump_idx[j + 1]
                 if seg_end - seg_start >= min_obs_count:
-                    seg = grouped_obs.iloc[seg_start:seg_end][columns_to_keep].copy()
+                    seg = grouped_obs.iloc[seg_start:seg_end].copy()
                     seg['pass_id'] = pass_counter
                     pass_per_station.append(seg)
                     pass_counter += 1
