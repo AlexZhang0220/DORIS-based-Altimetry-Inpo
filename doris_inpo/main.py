@@ -5,9 +5,6 @@ from pathlib import Path
 import pandas as pd
 from tqdm.auto import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import sys
-sys.path.append(".")
-sys.path.append("..")
 from doris_inpo.io.cycleinfo_reader import load_cycle_table, get_cycle_time_window
 from doris_inpo.io.altimetry_vtec_reader import load_altimetry_cycle
 from doris_inpo.io.doris_vtec_reader import load_doris_cycle
@@ -82,14 +79,14 @@ if __name__ == "__main__":
     cycle_list = range(70, 71)
 
     # Input
-    sinex_path = Path("/Volumes/T7Shield/DORISData/DORISInput/sinex/dpod2020_current.snx")
-    gim_root = Path("/Volumes/T7Shield/DORISData/DORISInput/IGSGIM")
-    doris_vtec_root = Path(f"/Volumes/T7Shield/DORISData/DORISVTECStorage/{satellite}")
-    alt_vtec_root = Path(f"/Volumes/T7Shield/AltimetryData/AltimetryVTECStorage/{satellite}")
+    sinex_path = Path("/DORISData/DORISInput/sinex/dpod2020_current.snx")
+    gim_root = Path("/DORISData/DORISInput/IGSGIM")
+    doris_vtec_root = Path(f"/DORISData/DORISVTECStorage/{satellite}")
+    alt_vtec_root = Path(f"/AltimetryData/AltimetryVTECStorage/{satellite}")
 
 
     # Output
-    dbav_root = Path(f"/Volumes/T7Shield/DORISData/DBAVStorage/{satellite}")
+    dbav_root = Path(f"/DORISData/DBAVStorage/{satellite}")
 
     max_workers = min(10, os.cpu_count() - 1)
 
