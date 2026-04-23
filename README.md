@@ -1,7 +1,7 @@
 DORIS-based VTEC Processing and Altimetry Interpolation Pipeline
 ===============================================================
 
-This repository implements a complete software pipeline for deriving
+This repository implements a complete pipeline for deriving
 Vertical Total Electron Content (VTEC) products from raw DORIS
 observations and interpolating them onto satellite altimetry
 observation points.
@@ -35,8 +35,6 @@ The complete workflow is organized as follows:
 - DORIS-based VTEC estimates are interpolated onto altimetry IPP
   locations at the cycle and pass levels.
 
-Intermediate results are stored between stages to avoid repeated
-processing and to support modular execution.
 
 ----------------------------------------------------------------------
 3. DORIS-based VTEC Processing Pipeline
@@ -63,7 +61,7 @@ Processing steps include:
 - Computing raw STEC from dual-frequency phase observations
 
 Outputs of Stage 1 consist of intermediate STEC products stored on disk
-in a structured tabular format.
+in python pickle file, and can be accessed with pandas.read_pickle.
 
 ----------------------------------------------------------------------
 3.2 Stage 2: STEC to Leveled VTEC
@@ -124,7 +122,7 @@ For each pass:
 
 - A time window is defined based on altimetry observation epochs
 - Corresponding DORIS observations are selected
-- Spatio-temporal interpolation is applied to estimate DORIS-based VTEC
+- Spatial interpolation is applied to estimate DORIS-based VTEC
   at altimetry IPP locations
 
 Pass-level processing is parallelized, while cycle-level data loading
