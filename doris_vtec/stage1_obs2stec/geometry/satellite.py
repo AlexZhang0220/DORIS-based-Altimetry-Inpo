@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from numba import njit
+from ...io.utils import correct_receiver_epochs
 
 @njit
 def batch_lagrange_interp_1d(x_known, y_known, x_interp):
@@ -52,10 +53,12 @@ def add_satellite_position(
         Observation DataFrame containing:
         - obs_epoch
         - receiver_clock_offset
+        - prn (one satellite)
 
     df_sp3 : pd.DataFrame
         Satellite orbit DataFrame containing:
         - epoch
+        - prn
         - x, y, z   (meters)
 
     Returns
@@ -64,6 +67,32 @@ def add_satellite_position(
         Input DataFrame with additional columns:
         - sat_x, sat_y, sat_z (meters)
     """
+    df_obs = correct_receiver_epochs(df_obs)
+    if df_obs.empty:
+        for column in ("sat_x", "sat_y", "sat_z"):
+            df_obs[column] = pd.Series(index=df_obs.index, dtype=float)
+        return df_obs
+
+    if "prn" not in df_obs or "prn" not in df_sp3:
+        raise ValueError("Observation and SP3 PRNs are required.")
+    prns = df_obs["prn"].drop_duplicates()
+    if len(prns) != 1 or pd.isna(prns.iloc[0]):
+        raise ValueError("One observation PRN is required.")
+    prn = prns.iloc[0]
+    df_sp3 = df_sp3.loc[df_sp3["prn"].eq(prn)].copy()
+    if df_sp3.empty:
+        raise ValueError(f"No SP3 orbit for {prn}.")
+
+    df_sp3["epoch"] = pd.to_datetime(df_sp3["epoch"], errors="raise")
+    if df_sp3["epoch"].isna().any() or df_sp3["epoch"].dt.tz is not None:
+        raise ValueError("SP3 epochs must be finite timezone-naive labels.")
+    df_sp3 = df_sp3.sort_values("epoch").reset_index(drop=True)
+    if df_sp3["epoch"].duplicated().any():
+        raise ValueError(f"Duplicate SP3 epochs for {prn}.")
+    eph_xyz = df_sp3[["x", "y", "z"]].to_numpy(dtype=float)
+    if not np.isfinite(eph_xyz).all():
+        raise ValueError(f"Non-finite SP3 coordinates for {prn}.")
+
     # --------------------------------------------------
     # Prepare satellite ephemeris (block-level)
     # --------------------------------------------------
@@ -74,15 +103,10 @@ def add_satellite_position(
         / 10**9
     )
 
-    eph_xyz = df_sp3[["x", "y", "z"]].to_numpy()
-
     # --------------------------------------------------
     # Observation times (apply receiver clock offset)
     # --------------------------------------------------
-    obs_time = (
-        pd.to_datetime(df_obs["obs_epoch"])
-        + pd.to_timedelta(df_obs["receiver_clock_offset"], unit="s")
-    )
+    obs_time = df_obs["obs_epoch"]
     obs_seconds = obs_time.astype("int64") / 10**9
 
     unique_seconds = np.unique(obs_seconds)
@@ -93,6 +117,15 @@ def add_satellite_position(
     # Lagrange interpolation 
     # --------------------------------------------------
     for t in unique_seconds:
+        if (
+            len(eph_seconds) < 2
+            or t < eph_seconds[0]
+            or t > eph_seconds[-1]
+        ):
+            sat_x_list.append(np.nan)
+            sat_y_list.append(np.nan)
+            sat_z_list.append(np.nan)
+            continue
         idx = np.searchsorted(eph_seconds, t)
 
         half = num_neighbors // 2
@@ -133,8 +166,10 @@ def add_satellite_position(
     )
 
     df_obs = df_obs.copy()
+    attributes = dict(df_obs.attrs)
     df_obs["obs_seconds"] = obs_seconds
     df_obs = df_obs.merge(interp_df, on="obs_seconds", how="left")
     df_obs = df_obs.drop(columns=["obs_seconds"])
+    df_obs.attrs.update(attributes)
 
     return df_obs

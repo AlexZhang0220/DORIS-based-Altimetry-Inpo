@@ -1,4 +1,6 @@
+import numpy as np
 import pandas as pd
+from ...io.utils import tai_epochs_to_utc
 
 
 SECONDS_PER_YEAR = 365.25 * 86400.0
@@ -10,9 +12,9 @@ def add_station_position(
     """
     Add station ECEF coordinates to observation DataFrame.
 
-    For each station, a single station position is computed using the
-    first observation epoch of that station and applied to all
-    observations of the same station.
+    For each matched SINEX solution interval, a single station position is
+    computed using its first observation epoch and applied to observations
+    in that interval. Unmatched rows retain missing coordinates.
 
     Parameters
     ----------
@@ -37,45 +39,41 @@ def add_station_position(
         Input DataFrame with additional columns:
         - sta_x, sta_y, sta_z   (meters)
     """
-    sta_records = []
+    result = df_obs.copy().reset_index(drop=True)
+    result["antenna_type"] = ""
+    result[["sta_x", "sta_y", "sta_z"]] = np.nan
+    assigned = pd.Series(False, index=result.index)
 
     # ------------------------------------------
-    # Compute one station position per station
+    # Compute one station position per matched solution interval
     # ------------------------------------------
-    for station_code, obs_group in df_obs.groupby("station_code"):
-        # Representative epoch: first epoch of the raw observations
-        t_ref = obs_group["obs_epoch"].iloc[0]
+    for station_code, obs_group in result.groupby("station_code"):
+        times = obs_group["obs_epoch"].copy()
+        if df_obs.attrs.get("obs_epoch_receiver_clock_corrected") is True:
+            # SINEX validity limits and reference epochs are UTC labels.
+            times = pd.Series(
+                tai_epochs_to_utc(times.to_numpy()), index=obs_group.index
+            )
 
         sta_group = df_sta[df_sta["station_code"] == station_code]
+        for sol in sta_group.itertuples(index=False):
+            valid = times.between(sol.start_obs, sol.end_obs, inclusive="both")
+            idx = times.index[valid]
+            if len(idx) == 0:
+                continue
+            if assigned.loc[idx].any():
+                raise ValueError(f"Overlapping SINEX solutions: {station_code}")
 
-        valid = (
-            (sta_group["start_obs"] <= t_ref)
-            &  (t_ref <= sta_group["end_obs"])
-        )
+            # Retain the old representative-epoch position within each interval.
+            t_ref = times.loc[idx].iloc[0]
+            dt_year = (t_ref - sol.ref_epoch).total_seconds() / SECONDS_PER_YEAR
 
-        if valid.sum() != 1:
-            continue  # no valid or ambiguous solution
+            for axis in "xyz":
+                result.loc[idx, f"sta_{axis}"] = (
+                    getattr(sol, axis) + getattr(sol, f"v{axis}") * dt_year
+                )
+            result.loc[idx, "antenna_type"] = sol.antenna_type
+            assigned.loc[idx] = True
 
-        sol = sta_group.loc[valid].iloc[0]
-
-        dt_year = (
-            (t_ref - sol["ref_epoch"]).total_seconds()
-            / SECONDS_PER_YEAR
-        )
-
-        sta_records.append(
-            {
-                "station_code": station_code,
-                "antenna_type": sol["antenna_type"],
-                "sta_x": sol["x"] + sol["vx"] * dt_year,
-                "sta_y": sol["y"] + sol["vy"] * dt_year,
-                "sta_z": sol["z"] + sol["vz"] * dt_year,
-            }
-        )
-
-    df_sta_day = pd.DataFrame(sta_records)
-
-    # ------------------------------------------
-    # Attach station positions to observations
-    # ------------------------------------------
-    return df_obs.merge(df_sta_day, on="station_code", how="left")
+    result.attrs.update(df_obs.attrs)
+    return result

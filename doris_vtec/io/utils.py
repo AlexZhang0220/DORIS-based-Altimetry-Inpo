@@ -4,6 +4,62 @@ import pandas as pd
 
 SP3_RANGE_PATTERN = re.compile(r"\.b(\d{5})\.e(\d{5})\.")
 
+
+def tai_epochs_to_utc(epochs):
+    """Convert TAI labels to UTC for SINEX/GIM labels and file selection.
+
+    UTC leap seconds, which numpy cannot represent, belong to the final
+    nanosecond of their UTC day. Physical interpolation must remain in TAI.
+    """
+    import numpy as np
+    from astropy.time import Time
+
+    index = pd.DatetimeIndex(pd.to_datetime(epochs, errors="coerce"))
+    if index.tz is not None or index.isna().any():
+        raise ValueError("TAI epochs must be finite timezone-naive labels.")
+    tai = index.to_numpy(dtype="datetime64[ns]")
+    utc = Time(tai, format="datetime64", scale="tai").utc
+    utc.precision = 9
+    try:
+        return np.asarray(utc.datetime64, dtype="datetime64[ns]")
+    except ValueError as exc:
+        if "Seconds out of range" not in str(exc):
+            raise
+    labels = np.atleast_1d(utc.isot)
+    leap = np.asarray([label[17:19] == "60" for label in labels])
+    if not leap.any():
+        raise ValueError("UTC conversion failed without a leap second.")
+    result = np.empty(tai.shape, dtype="datetime64[ns]")
+    result[~leap] = np.asarray(utc[~leap].datetime64, dtype="datetime64[ns]")
+    result[leap] = [np.datetime64(label[:10], "D") + np.timedelta64(1, "D")
+                    - np.timedelta64(1, "ns") for label in labels[leap]]
+    return result
+
+
+def correct_receiver_epochs(observations: pd.DataFrame) -> pd.DataFrame:
+    """Apply the RINEX receiver offset once, preserving legacy column names.
+
+    Old Stage1 tables retain the raw receiver epoch and its offset. New tables
+    mark the corrected TAI identity so subsequent stages do not add it twice.
+    Unknown-time tables without an offset are not relabeled as corrected TAI.
+    """
+    import numpy as np
+
+    result = observations.copy()
+    epochs = pd.to_datetime(result["obs_epoch"], errors="coerce")
+    if epochs.isna().any() or epochs.dt.tz is not None:
+        raise ValueError("Observation epochs must be finite timezone-naive labels.")
+    if result.attrs.get("obs_epoch_receiver_clock_corrected") is not True:
+        if "receiver_clock_offset" not in result:
+            raise ValueError("Receiver clock offset is required for unverified epochs.")
+        offset = pd.to_numeric(result["receiver_clock_offset"], errors="coerce")
+        if not np.isfinite(offset.to_numpy(float)).all():
+            raise ValueError("Receiver clock offsets must be finite seconds.")
+        epochs = epochs + pd.to_timedelta(offset, unit="s")
+    result["obs_epoch"] = epochs
+    result.attrs.update(obs_epoch_time_scale="TAI", obs_epoch_receiver_clock_corrected=True)
+    return result
+
 def parse_sp3_time(yydoy: int) -> pd.Timestamp:
     """
     Parse SP3 YYDOY time code into pandas Timestamp.

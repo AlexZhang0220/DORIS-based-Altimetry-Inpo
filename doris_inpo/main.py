@@ -11,6 +11,7 @@ from doris_inpo.io.doris_vtec_reader import load_doris_cycle
 from doris_inpo.io.gim_vtec_reader import load_gim_cycle
 from doris_vtec.stage2_stec2vtec.leveling.gim_interpolation import get_gim_vtec
 from doris_vtec.io.sinex_reader import read_sinex_file
+from doris_vtec.io.utils import tai_epochs_to_utc
 
 from doris_inpo.interpolation.prefilter import altimetry_distance_mask
 from doris_inpo.interpolation.doris_based_alt_inpo import altimetry_inpo
@@ -119,7 +120,9 @@ if __name__ == "__main__":
         df_doris_cycle = load_doris_cycle(
             doris_vtec_dir=doris_vtec_root, 
             cycle_start=cycle_start, 
-            cycle_end=cycle_end
+            cycle_end=cycle_end,
+            require_corrected_tai=True,
+            time_margin_sec=300.0,
         )
         gim_cycle, lat_grid, lon_grid = load_gim_cycle(
             gim_dir=gim_root, 
@@ -131,7 +134,7 @@ if __name__ == "__main__":
         # Compute station coordinates and gim reference at cycle start (once per cycle)
         # ---------------------------------------------------------------------
         sta_records = []
-        t_ref = cycle_start
+        t_ref = pd.Timestamp(tai_epochs_to_utc([cycle_start])[0])
 
         for station_code in df_doris_cycle["station_code"].unique():
 
@@ -169,7 +172,10 @@ if __name__ == "__main__":
             sta_xyz, 
             max_km=DEFAULT_INPO_CONFIG["max_station_distance"])
 
-        df_alt_cycle['gim_vtec'] = get_gim_vtec(gim_cycle, lat_grid, lon_grid, df_alt_cycle)
+        df_alt_cycle['gim_vtec'] = get_gim_vtec(
+            gim_cycle, lat_grid, lon_grid, df_alt_cycle,
+            observation_time_system="TAI",
+        )
         # ---------------------------------------------------------------------
         # Pass-level multiprocessing
         # ---------------------------------------------------------------------
@@ -214,7 +220,7 @@ if __name__ == "__main__":
             df_out = pd.concat(results, axis=0).reset_index(drop=True)
             df_out = df_out.sort_values(by=["obs_epoch"]).reset_index(drop=True)
 
-            out_dir = paths["dbav"]/"cycle_unit"
+            out_dir = dbav_root/"cycle_unit"
             out_dir.mkdir(parents=True, exist_ok=True)
 
             out_file = out_dir/f"cycle{cycle_number:03d}.pickle"

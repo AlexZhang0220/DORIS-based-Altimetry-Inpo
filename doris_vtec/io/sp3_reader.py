@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import xarray as xr
 from pathlib import Path
@@ -18,21 +19,31 @@ def _load_sp3_datasets(sp3_files: Iterable[Path]) -> xr.Dataset:
     return xr.concat(ds_list, dim="time")
 
 
+def _pivot_sp3(ds: xr.Dataset, name: str) -> pd.DataFrame:
+    """Deduplicate matching records without averaging conflicting states."""
+    keys = ["time", "sv", "ECEF"]
+    rows = ds[name].to_dataframe().reset_index()[keys + [name]]
+    rows = rows.dropna(subset=[name])
+    if not np.isfinite(rows[name].to_numpy(dtype=float)).all():
+        raise ValueError(f"Non-finite SP3 {name} records.")
+    if rows.groupby(keys)[name].nunique().gt(1).any():
+        raise ValueError(f"Conflicting SP3 {name} records.")
+
+    rows = rows.drop_duplicates(keys)
+    return (
+        rows.pivot(index=["time", "sv"], columns="ECEF", values=name)
+        .reindex(columns=["x", "y", "z"])
+        .reset_index()
+    )
+
+
 def _sp3_dataset_to_dataframe(ds: xr.Dataset) -> pd.DataFrame:
     """
     Convert SP3 xarray Dataset to a pandas DataFrame.
     """
     # -------- position --------
     df_pos = (
-        ds["position"]
-        .to_dataframe()
-        .reset_index()
-        .pivot_table(
-            index=["time", "sv"],
-            columns="ECEF",
-            values="position",
-        )
-        .reset_index()
+        _pivot_sp3(ds, "position")
         .rename(columns={
             "time": "epoch",
             "sv": "prn",
@@ -44,15 +55,7 @@ def _sp3_dataset_to_dataframe(ds: xr.Dataset) -> pd.DataFrame:
 
     # -------- velocity --------
     df_vel = (
-        ds["velocity"]
-        .to_dataframe()
-        .reset_index()
-        .pivot_table(
-            index=["time", "sv"],
-            columns="ECEF",
-            values="velocity",
-        )
-        .reset_index()
+        _pivot_sp3(ds, "velocity")
         .rename(columns={
             "time": "epoch",
             "sv": "prn",

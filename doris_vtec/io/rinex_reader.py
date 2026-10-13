@@ -23,6 +23,7 @@ def parse_rinex_header(header_lines: list[str]) -> dict:
     Parse header information from a DORIS RINEX file.
     """
     obs_type = []
+    scale_factors = {}
     stations = []
     prn = None
 
@@ -43,6 +44,19 @@ def parse_rinex_header(header_lines: list[str]) -> dict:
                 line[i+6:i+10].strip()
                 for i in range(0, 4 * n, 4)
             ]
+
+        elif label == "SYS / SCALE FACTOR":
+            tokens = line[:60].split()
+            if len(tokens) < 3 or tokens[0] != "D":
+                raise ValueError("Malformed DORIS SYS / SCALE FACTOR record.")
+            factor = float(tokens[1])
+            count = int(tokens[2])
+            affected = tokens[3:] if count else obs_type
+            if not np.isfinite(factor) or factor <= 0.0:
+                raise ValueError("RINEX scale factor must be finite and positive.")
+            if count and len(affected) != count:
+                raise ValueError("Incomplete RINEX SYS / SCALE FACTOR record.")
+            scale_factors.update({observable: factor for observable in affected})
 
         elif label == "STATION REFERENCE":
             stations.append({
@@ -70,6 +84,7 @@ def parse_rinex_header(header_lines: list[str]) -> dict:
 
     return {
         "obs_type": obs_type,
+        "scale_factors": scale_factors,
         "stations": stations,
         "prn": prn,
     }
@@ -78,6 +93,20 @@ def parse_rinex_header(header_lines: list[str]) -> dict:
 # ============================================================
 # Observation body parser
 # ============================================================
+
+def _parse_receiver_clock_offset(line: str) -> float:
+    """Read the complete F13.9 field without dropping its leading sign."""
+    line = line.rstrip("\r\n")
+    if len(line) < 56 or line[56:57] not in ("", " ") or line[58:].strip():
+        raise ValueError("RINEX receiver clock offset violates the F13.9 layout.")
+    text = line[43:56].strip()
+    if not text:
+        raise ValueError("RINEX epoch record has no receiver clock offset.")
+    value = float(text)
+    if not np.isfinite(value):
+        raise ValueError("RINEX receiver clock offset must be finite.")
+    return value
+
 
 def parse_rinex_obs(obs_lines: list[str], header: dict) -> pd.DataFrame:
     """
@@ -100,7 +129,7 @@ def parse_rinex_obs(obs_lines: list[str], header: dict) -> pd.DataFrame:
                 line[2:31],
                 format="%Y %m %d %H %M %S.%f"
             )
-            receiver_clock_offset = float(line[44:56])
+            receiver_clock_offset = _parse_receiver_clock_offset(line)
             continue
 
         if not line.startswith("D"):
@@ -125,7 +154,9 @@ def parse_rinex_obs(obs_lines: list[str], header: dict) -> pd.DataFrame:
 
         for k in ("L1", "L2", "C1", "C2"):
             record[k] = (
-                obs_fields[obs_type.index(k)] * (10.0 if k.startswith("C") else 1.0)
+                obs_fields[obs_type.index(k)]
+                * ((1000.0 if k.startswith("C") else 1.0)
+                   / header.get("scale_factors", {}).get(k, 1.0))
                 if k in obs_type else np.nan
             )
 

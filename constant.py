@@ -33,4 +33,4 @@ starec_L2_pco =  0
 alcatel_L1_pco =  0.510
 alcatel_L2_pco =  0.335
 starec_ja3_iono_comb_pco = (iono_coeff * (jason3_L1_pco + starec_L1_pco) - (jason3_L2_pco + starec_L2_pco)) / (iono_coeff - 1)
-starec_ja3_iono_comb_pco = (iono_coeff * (jason3_L1_pco + alcatel_L1_pco) - (jason3_L2_pco + alcatel_L2_pco)) / (iono_coeff - 1)
+alcatel_ja3_iono_comb_pco = (iono_coeff * (jason3_L1_pco + alcatel_L1_pco) - (jason3_L2_pco + alcatel_L2_pco)) / (iono_coeff - 1)

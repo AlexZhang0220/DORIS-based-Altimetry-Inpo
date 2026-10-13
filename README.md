@@ -1,172 +1,170 @@
-DORIS-based VTEC Processing and Altimetry Interpolation Pipeline
-===============================================================
+# DORIS VTEC and Altimetry Interpolation
 
-This repository implements a complete pipeline for deriving
-Vertical Total Electron Content (VTEC) products from raw DORIS
-observations and interpolating them onto satellite altimetry
-observation points.
+Derive vertical total electron content (VTEC) from dual-frequency DORIS
+observations, then interpolate it onto satellite altimetry ionospheric
+pierce points (IPPs). The repository retains the original two-stage DORIS
+workflow and a separate cycle-level altimetry interpolation workflow.
 
-----------------------------------------------------------------------
-1. Scope of the Repository
-----------------------------------------------------------------------
+```text
+DORIS RINEX + SP3 + SINEX
+          │
+          ▼
+Stage 1: geometry and raw STEC ──► daily .pkl
+          │
+          ▼  UTC GIM reference
+Stage 2: arc detection and leveling ──► daily VTEC .pickle
+          │
+          ▼  altimetry IPPs + cycle tables + GIM + SINEX
+INPO: DORIS-to-altimetry interpolation ──► cycleNNN.pickle
+```
 
-The repository consists of two logically independent but sequential
-pipelines:
+## Setup
 
-1. A DORIS-based VTEC processing pipeline that converts raw DORIS
-   observations into leveled VTEC products.
+Use a Python environment with these runtime packages:
+```bash
+python -m pip install numpy pandas scipy pyproj georinex xarray numba tqdm astropy
+```
 
-2. A DORIS-to-altimetry interpolation pipeline that transfers DORIS-
-   based VTEC estimates onto altimetry ionospheric pierce points (IPPs).
+Install `pytest` to run the regression checks. Astropy provides the historical
+TAI/UTC conversion; it is required by the corrected workflow.
+This repository does not download input data. Prepare DORIS RINEX, SP3,
+SINEX and supported IGS IONEX files. INPO additionally requires daily
+altimetry products and cycle-definition CSV files.
 
-Each pipeline can be executed independently using clearly defined
-intermediate products stored on disk.
+## Configure and run
 
-----------------------------------------------------------------------
-2. Overall Workflow
-----------------------------------------------------------------------
+Run the modules from the repository root. They use parameters defined in
+their source files; there is no command-line date or stage selector.
 
-The complete workflow is organized as follows:
+1. Edit [`doris_vtec/main.py`](doris_vtec/main.py): set the satellite,
+   `start_date`, `proc_days`, `block_days`, and all input/output roots.
+   Defaults select Jason-3 (`ja3`) and 11 days starting 2018-01-01.
+2. Review the processing settings in
+   [`doris_vtec/config.py`](doris_vtec/config.py), then run both DORIS stages:
 
-- Raw DORIS observation files are processed to generate Slant TEC (STEC)
-  time series.
-- STEC products are leveled using Global Ionospheric Map (GIM)
-  references to obtain DORIS-based VTEC.
-- DORIS-based VTEC estimates are interpolated onto altimetry IPP
-  locations at the cycle and pass levels.
+   ```bash
+   python -m doris_vtec.main
+   ```
 
+3. Edit [`doris_inpo/main.py`](doris_inpo/main.py): set the satellite,
+   `cycle_list`, data roots, cycle-table paths and worker count. Defaults
+   select Jason-3 cycle 70. Review
+   [`doris_inpo/config.py`](doris_inpo/config.py), then run:
 
-----------------------------------------------------------------------
-3. DORIS-based VTEC Processing Pipeline
-----------------------------------------------------------------------
+   ```bash
+   python -m doris_inpo.main
+   ```
 
-This pipeline converts raw DORIS observations into leveled Vertical
-Total Electron Content (VTEC) products using a two-stage strategy.
+Change the example absolute data paths for your installation. Use new output directories for
+validation: executing a pipeline can replace an existing product at the same
+path. The satellite list in the example driver is not a guarantee of full
+support; the retained detector is specific to Jason-3 (`L39`) with supported
+STAREC/ALCATEL antennas.
 
-----------------------------------------------------------------------
-3.1 Stage 1: DORIS Observation to STEC
-----------------------------------------------------------------------
+## Products and interfaces
 
-Stage 1 is responsible for converting raw DORIS observation files into
-raw Slant Total Electron Content (STEC) time series.
+| Product | Path below its configured root | Content |
+| --- | --- | --- |
+| Stage 1 | `YEAR/DOYddd.pkl` | Observations, corrected time, geometry and raw STEC |
+| Stage 2 | `YEAR/DOYddd.pickle` | Leveled DORIS STEC and VTEC |
+| INPO | `cycle_unit/cycleNNN.pickle` | Altimetry rows with interpolated DORIS and reference GIM VTEC |
 
-Processing steps include:
+Products are pandas DataFrames readable with `pandas.read_pickle`. The
+Stage 2 public schema remains these ten columns:
 
-- Reading and parsing DORIS RINEX observation files
-- Loading station coordinates from SINEX files
-- Loading precise satellite orbits from SP3 files
-- Interpolating station and satellite positions to observation epochs
-- Computing geometric parameters such as elevation angles and IPP
-  coordinates
-- Computing raw STEC from dual-frequency phase observations
+```text
+obs_epoch, ipp_lat, ipp_lon, stec, vtec, elevation,
+map_value, station_code, prn, pass_id
+```
 
-Outputs of Stage 1 consist of intermediate STEC products stored on disk
-in python pickle file, and can be accessed with pandas.read_pickle.
+Here `stec` is the leveled STEC, not the raw Stage 1 value. Product identity
+is also stored in DataFrame `attrs`; preserve these attributes when passing
+products between stages.
 
-----------------------------------------------------------------------
-3.2 Stage 2: STEC to Leveled VTEC
-----------------------------------------------------------------------
+## Time conventions
 
-Stage 2 converts intermediate STEC products into leveled VTEC products
-using external ionospheric references.
+| Data or operation | Convention |
+| --- | --- |
+| DORIS `obs_epoch` after Stage 1 | Receiver-clock-corrected TAI |
+| Altimetry `obs_epoch` and cycle boundaries | TAI input contract |
+| DORIS/altimetry temporal matching | TAI against TAI |
+| GIM map epochs and daily file selection | UTC |
+| SINEX validity/reference queries | UTC |
 
-Processing steps include:
+GIM and SINEX queries convert TAI observations to UTC using historical leap
+seconds. They do not apply a fixed modern offset. Altimetry and cycle-table
+loaders assume their upstream timestamps already satisfy the TAI contract;
+they do not automatically verify or convert the source time scale.
 
-- Grouping STEC data by station and satellite
-- Segmenting observations into continuous passes
-- Selecting a reference epoch per pass based on maximum elevation
-- Interpolating GIM VTEC values at the reference IPP
-- Applying a pass-wise constant offset for leveling
-- Converting corrected STEC to VTEC using geometric mapping functions
+## Scientific behavior and correctness fixes
 
-Outputs of Stage 2 include leveled DORIS VTEC products together with
-associated geometric and pass-level parameters.
+The original defaults remain: Jason-3 leveling ratio `0.925`, 8-point
+Lagrange orbit interpolation, 10° observation elevation mask, minimum 30
+observations per arc, 9-second time-gap rule and 0° reference-elevation
+threshold. IPP geometry and the nonzero-distance `1/d` interpolation weights
+are unchanged. No new interpolation estimator or attitude model is included.
 
-----------------------------------------------------------------------
-4. DORIS-based Altimetry VTEC Interpolation Pipeline
-----------------------------------------------------------------------
+- RINEX uses `SYS / SCALE FACTOR`; the complete receiver-clock field is read
+  and the clock correction is applied once.
+- Satellite and ground PCO offsets use their respective nominal LOS
+  projections. Frequency, wavelength, dual-frequency signs and units remain
+  unchanged; separate STAREC/ALCATEL constants are retained.
+- Missing phases are removed before time segmentation; both detector fits
+  reject non-finite inputs and residuals.
+- SP3 records are matched to the observation PRN. Conflicting duplicates
+  fail, and queries outside orbit coverage return NaN. Station coordinates
+  are matched by SINEX validity interval; overlapping solutions fail.
+- IONEX `9999` is missing data. The retained reader supports 13 maps on the
+  71 × 73 grid; unsupported layouts fail. GIM interpolation remains
+  Earth-fixed bilinear in space and linear in time. Queries outside coverage
+  or across gaps longer than the declared positive `INTERVAL` return NaN.
+- Cross-file GIM grids and intervals must agree. Conflicting shared-midnight
+  maps use the file belonging to that UTC day; other map conflicts fail.
+- INPO reads a 300-second DORIS margin around each cycle for the existing
+  pass window. Altimetry target rows, the ±5-minute pass window, the strict
+  `<400 s` point window and spatial thresholds are retained. Exactly
+  coincident IDW observations use their finite-value mean.
 
-This pipeline interpolates DORIS-based VTEC estimates onto altimetry
-observation points at the cycle level.
+`read_ionex_file` still returns `(maps, latitude_grid, longitude_grid)`;
+`maps` is a dict-compatible object carrying `interval_seconds`. Preserve
+that metadata when merging maps. `get_gim_vtec` assumes TAI query timestamps
+by default; explicitly pass `observation_time_system="UTC"` for UTC inputs.
 
-----------------------------------------------------------------------
-4.1 Input Data
-----------------------------------------------------------------------
+## Relation to the manuscript
 
-The interpolation pipeline uses the following inputs:
+The current manuscript revision describes iterative fit-and-split detection
+in §3.2 (PDF page 8). This repository retains the legacy fixed two-stage
+implementation: first, a residual jump above 10 cycles enables splitting at
+`|z-score| > 3`; each surviving segment is refitted once and split at residual
+jumps above 3.5 cycles. It does not repeat until convergence. Both use the
+`5L1 − L2` observable and a fit with constant, time and `1/sin(elevation)`
+terms. The original gross L1-jump screen (`>5e5`) applies only when a group
+falls within one calendar date.
 
-- Altimetry observation data, including observation epochs, IPP
-  locations, and pass identifiers
-- DORIS-based VTEC products generated by the previous pipeline
-- Global Ionospheric Map (GIM) files for reference VTEC
-- Station coordinates and velocities from SINEX files
+The manuscript's §3.1 (PDF page 7) writes PCO with a shared `sin(elevation)`
+factor; this release corrects the endpoint projections to LOS geometry.
+Consequently, this release should not be described as reproducing the
+manuscript's exact arc population or reported percentages. No detector
+replacement to enforce manuscript equivalence is included.
 
-----------------------------------------------------------------------
-4.2 Cycle-level Preprocessing
-----------------------------------------------------------------------
+## Historical products and validation
 
-For each altimetry cycle, the following preprocessing steps are applied:
+Rebuild Stage 1 before Stage 2: Stage 2 rejects intermediates without the
+corrected-TAI and LOS-PCO identity markers. Normal INPO processing requires
+marked corrected-TAI VTEC. Its direct DORIS reader can read historical files,
+but preserves unknown time identity and rejects mixed conventions. Existing
+archives are not automatically migrated; keep them separate from rebuilt
+outputs and do not relabel old products as newly validated ones.
 
-- Selection and propagation of station coordinates to the cycle epoch
-- Spatial prefiltering of altimetry IPPs based on distance to active
-  DORIS stations
-- Interpolation of GIM VTEC values onto altimetry IPP locations
+```bash
+python -m pip install pytest
+python -m pytest tests -q
+```
 
-----------------------------------------------------------------------
-4.3 Pass-level Interpolation
-----------------------------------------------------------------------
+The preparation snapshot passed 149 regression tests, including PCO,
+readers, time identity, orbit/station safeguards, GIM boundaries and INPO
+edge cases. This is a recorded validation result, not a guarantee for every
+input dataset or future revision. Tests use isolated temporary products.
 
-Each altimetry cycle is divided into independent passes.
-
-For each pass:
-
-- A time window is defined based on altimetry observation epochs
-- Corresponding DORIS observations are selected
-- Spatial interpolation is applied to estimate DORIS-based VTEC
-  at altimetry IPP locations
-
-Pass-level processing is parallelized, while cycle-level data loading
-is performed only once per cycle.
-
-----------------------------------------------------------------------
-4.4 Output Products
-----------------------------------------------------------------------
-
-After all passes within a cycle are processed:
-
-- Valid pass-level results are concatenated
-- Observations are sorted by observation epoch
-- Final results are saved to disk in cycle-based files
-
-Each output file contains altimetry observation information,
-interpolated DORIS-based VTEC, reference GIM VTEC, and pass and cycle
-identifiers.
-
-----------------------------------------------------------------------
-5. Execution
-----------------------------------------------------------------------
-
-The complete workflow is executed using Python module invocation.
-The two pipelines are run independently in sequence.
-
-Step 1: DORIS-based VTEC processing
-
-python -m doris_vtec.main
-
-This step performs the full DORIS VTEC processing workflow, including:
-- Parsing raw DORIS observation files
-- Computing Slant TEC (STEC)
-- Pass-wise leveling using Global Ionospheric Map (GIM) references
-- Generating leveled DORIS-based VTEC products
-
-Step 2: DORIS-to-altimetry VTEC interpolation
-
-python -m doris_inpo.main
-
-This step interpolates DORIS-based VTEC estimates onto altimetry
-ionospheric pierce points (IPPs), including:
-- Cycle-level data loading
-- Station coordinate propagation and spatial prefiltering
-- GIM reference VTEC interpolation
-- Pass-level DORIS-to-altimetry VTEC interpolation
-- Generation of cycle-based output products
+See the [DORIS processing guide](doris_vtec/README.md) and
+[altimetry interpolation guide](doris_inpo/README.md) for module details.

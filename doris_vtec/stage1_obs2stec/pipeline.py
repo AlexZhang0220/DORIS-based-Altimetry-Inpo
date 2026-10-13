@@ -5,7 +5,7 @@ import pandas as pd
 from ..io.sp3_reader import read_sp3_files
 from ..io.sinex_reader import read_sinex_file
 from ..io.rinex_reader import read_rinex_file
-from ..io.utils import find_covering_sp3_files_from_dir
+from ..io.utils import find_covering_sp3_files_from_dir, correct_receiver_epochs
 
 # Geometry
 from .geometry.satellite import add_satellite_position
@@ -145,6 +145,7 @@ def process_block(
         # ------------------------------------------------
         df_obs = (
             df_obs
+            .pipe(correct_receiver_epochs)
             .pipe(add_satellite_position, df_sp3)
             .pipe(add_station_position, df_sta)
             .pipe(add_elevation)

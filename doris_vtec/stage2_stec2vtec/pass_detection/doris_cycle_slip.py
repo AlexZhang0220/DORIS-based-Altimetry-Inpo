@@ -3,6 +3,31 @@ import pandas as pd
 from scipy.stats import zscore
 
 import constant
+from ...stage1_obs2stec.geometry.elevation import compute_pco_projection_cosines
+
+
+def _fit_residuals(X, y):
+    """Apply the existing least-squares fit only to finite input and output."""
+    if not (np.isfinite(X).all() and np.isfinite(y).all()):
+        raise ValueError("Non-finite cycle-slip fit input")
+
+    beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+    residuals = y - X @ beta
+    if not np.isfinite(residuals).all():
+        raise ValueError("Non-finite cycle-slip fit residuals")
+    return residuals
+
+
+def _projected_pco_phase_background(grouped_obs, wavelength_l1, wavelength_l2,
+                                    ground_l1, ground_l2):
+    """Project each endpoint before forming the existing 5L1-L2 background."""
+    satellite_cosine, ground_cosine = compute_pco_projection_cosines(grouped_obs)
+    return (
+        (5.0 * constant.jason3_L1_pco / wavelength_l1
+         - constant.jason3_L2_pco / wavelength_l2) * satellite_cosine
+        + (5.0 * ground_l1 / wavelength_l1
+           - ground_l2 / wavelength_l2) * ground_cosine
+    )
 
 
 def split_by_cycle_slip(
@@ -34,11 +59,11 @@ def split_by_cycle_slip(
     prn = grouped_obs["prn"].values[0]
 
     if sta_ant_type[0:6] == "STAREC" and prn == "L39":
-        L1_pco_offset = constant.jason3_L1_pco + constant.starec_L1_pco
-        L2_pco_offset = constant.jason3_L2_pco + constant.starec_L2_pco
+        ground_l1 = constant.starec_L1_pco
+        ground_l2 = constant.starec_L2_pco
     elif sta_ant_type[0:7] == "ALCATEL" and prn == "L39":
-        L1_pco_offset = constant.jason3_L1_pco + constant.alcatel_L1_pco
-        L2_pco_offset = constant.jason3_L2_pco + constant.alcatel_L2_pco
+        ground_l1 = constant.alcatel_L1_pco
+        ground_l2 = constant.alcatel_L2_pco
     else:
         return []
 
@@ -54,9 +79,8 @@ def split_by_cycle_slip(
     d_lambda1 = c / d_f1
     d_lambda2 = c / d_f2
 
-    cycle_slip_pco_offset = (
-        (5 / d_lambda1 * L1_pco_offset)
-        - (1 / d_lambda2 * L2_pco_offset)
+    cycle_slip_pco_background = _projected_pco_phase_background(
+        grouped_obs, d_lambda1, d_lambda2, ground_l1, ground_l2
     )
     geom_factor = 5 / d_lambda1 - 1 / d_lambda2
 
@@ -87,7 +111,7 @@ def split_by_cycle_slip(
 
     corrected_geom_distances = (
         geom_factor * geom_distances
-        - cycle_slip_pco_offset * np.sin(elev_rad)
+        - cycle_slip_pco_background
     )
 
     mapping_func = 1.0 / np.sin(elev_rad)
@@ -101,8 +125,7 @@ def split_by_cycle_slip(
         relative_sec,
         mapping_func,
     ))
-    beta, _, _, _ = np.linalg.lstsq(X, estimated_cycle_slip, rcond=None)
-    residuals = estimated_cycle_slip - X @ beta
+    residuals = _fit_residuals(X, estimated_cycle_slip)
     diff_residuals = np.diff(residuals)
 
     if np.max(np.abs(diff_residuals)) > 10:
@@ -129,8 +152,7 @@ def split_by_cycle_slip(
         ))
         y_sub = estimated_cycle_slip[start:end]
 
-        beta_sub, _, _, _ = np.linalg.lstsq(X_sub, y_sub, rcond=None)
-        residuals_sub = y_sub - X_sub @ beta_sub
+        residuals_sub = _fit_residuals(X_sub, y_sub)
         diff_res_sub = np.diff(residuals_sub)
 
         jump_idx = np.where(np.abs(diff_res_sub) > 3.5)[0] + 1

@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 from .time_segmentation import split_dataframe_by_time_gap
@@ -33,8 +34,13 @@ def detect_passes(
     # -------------------------------------------------
     # 1. Time-contiguous segmentation (coarse pass split)
     # -------------------------------------------------
+    # Missing phases cannot participate in either fit. Filter before time
+    # segmentation so a run of missing phases still creates the original gap.
+    valid_phase = np.isfinite(
+        obs_per_station[["L1", "L2"]].to_numpy(dtype=float)
+    ).all(axis=1)
     grouped_obs_list = split_dataframe_by_time_gap(
-        obs_per_station,
+        obs_per_station.loc[valid_phase].copy(),
         elev_thres=elev_thres,
         min_obs_count=min_obs_count,
     )

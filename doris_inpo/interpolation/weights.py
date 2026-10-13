@@ -7,7 +7,12 @@ def idw(dist_km, values):
     dist = np.asarray(dist_km, dtype=float)
     vals = np.asarray(values, dtype=float)
 
-    mask = np.isfinite(dist) & np.isfinite(vals) & (dist > 0)
+    finite = np.isfinite(dist) & np.isfinite(vals)
+    zero = finite & (dist == 0)
+    if np.any(zero):
+        return float(np.mean(vals[zero]))
+
+    mask = finite & (dist > 0)
     if not np.any(mask):
         return np.nan
 

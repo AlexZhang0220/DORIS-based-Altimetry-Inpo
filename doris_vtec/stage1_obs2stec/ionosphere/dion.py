@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import constant
+from ..geometry.elevation import compute_pco_projection_cosines
 
 
 def add_doris_stec(df_obs: pd.DataFrame) -> pd.DataFrame:
@@ -15,7 +16,7 @@ def add_doris_stec(df_obs: pd.DataFrame) -> pd.DataFrame:
     df_obs : pd.DataFrame
         Must contain columns:
         - L1, L2
-        - elevation           (degrees)
+        - sta_x, sta_y, sta_z and sat_x, sat_y, sat_z (meters, ECEF)
         - PRN
         - station_freq_shift
         - sta_ant_type
@@ -74,10 +75,8 @@ def add_doris_stec(df_obs: pd.DataFrame) -> pd.DataFrame:
         ),
     )
 
-    d_geomcorr = sat_off + ant_off
-
-    elevation_rad = np.deg2rad(df_obs["elevation"].values)
-    dion += d_k * (d_geomcorr * np.sin(elevation_rad))
+    satellite_cosine, ground_cosine = compute_pco_projection_cosines(df_obs)
+    dion += d_k * (sat_off * satellite_cosine + ant_off * ground_cosine)
 
     # --------------------------------------------------
     # Convert to STEC (TECU)
@@ -86,5 +85,6 @@ def add_doris_stec(df_obs: pd.DataFrame) -> pd.DataFrame:
 
     df_obs["dion"] = dion
     df_obs["stec"] = stec
+    df_obs.attrs["pco_projection_model"] = "nominal_los_v1"
 
     return df_obs

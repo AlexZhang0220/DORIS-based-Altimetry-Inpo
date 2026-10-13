@@ -3,6 +3,50 @@ import pandas as pd
 from pyproj import Transformer
 
 
+def compute_pco_projection_cosines(df_obs: pd.DataFrame):
+    """Return nominal satellite-axis and ground-Up LOS projection cosines.
+
+    The LOS points from the station to the satellite. The positive satellite
+    factor is the outward WGS84 ellipsoid normal dotted with that LOS,
+    equivalently minus the nominal nadir antenna axis dotted with the LOS.
+    The ground factor is local Up dotted with the same LOS, or sin(elevation).
+    These are different axes and must not share one elevation factor.
+    """
+    station = df_obs[["sta_x", "sta_y", "sta_z"]].to_numpy(dtype=float)
+    satellite = df_obs[["sat_x", "sat_y", "sat_z"]].to_numpy(dtype=float)
+    los = satellite - station
+    distance = np.linalg.norm(los, axis=1)
+    valid = (
+        np.isfinite(station).all(axis=1)
+        & np.isfinite(satellite).all(axis=1)
+        & (distance > 0.0)
+        & (np.linalg.norm(station, axis=1) > 0.0)
+        & (np.linalg.norm(satellite, axis=1) > 0.0)
+    )
+    satellite_cosine = np.full(len(df_obs), np.nan)
+    ground_cosine = np.full(len(df_obs), np.nan)
+    if not valid.any():
+        return satellite_cosine, ground_cosine
+    transformer = Transformer.from_crs(
+        "EPSG:4978", "EPSG:4326", always_xy=True
+    )
+
+    def outward_normal(positions):
+        lon, lat, _ = transformer.transform(
+            positions[:, 0], positions[:, 1], positions[:, 2], radians=True
+        )
+        return np.column_stack((
+            np.cos(lat) * np.cos(lon),
+            np.cos(lat) * np.sin(lon),
+            np.sin(lat),
+        ))
+
+    los_unit = los[valid] / distance[valid, None]
+    satellite_cosine[valid] = np.einsum("ij,ij->i", outward_normal(satellite[valid]), los_unit)
+    ground_cosine[valid] = np.einsum("ij,ij->i", outward_normal(station[valid]), los_unit)
+    return satellite_cosine, ground_cosine
+
+
 def add_elevation(df_obs: pd.DataFrame) -> pd.DataFrame:
     """
     Add elevation angle to observation DataFrame.
