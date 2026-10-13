@@ -25,8 +25,8 @@ Use a Python environment with these runtime packages:
 python -m pip install numpy pandas scipy pyproj georinex xarray numba tqdm astropy
 ```
 
-Install `pytest` to run the regression checks. Astropy provides the historical
-TAI/UTC conversion; it is required by the corrected workflow.
+Astropy provides the historical TAI/UTC conversion; it is required by the
+corrected workflow.
 This repository does not download input data. Prepare DORIS RINEX, SP3,
 SINEX and supported IGS IONEX files. INPO additionally requires daily
 altimetry products and cycle-definition CSV files.
@@ -156,15 +156,11 @@ but preserves unknown time identity and rejects mixed conventions. Existing
 archives are not automatically migrated; keep them separate from rebuilt
 outputs and do not relabel old products as newly validated ones.
 
-```bash
-python -m pip install pytest
-python -m pytest tests -q
-```
-
 The preparation snapshot passed 149 regression tests, including PCO,
 readers, time identity, orbit/station safeguards, GIM boundaries and INPO
 edge cases. This is a recorded validation result, not a guarantee for every
-input dataset or future revision. Tests use isolated temporary products.
+input dataset or future revision. Validation files are retained locally and
+are not distributed in this branch.
 
 See the [DORIS processing guide](doris_vtec/README.md) and
 [altimetry interpolation guide](doris_inpo/README.md) for module details.
